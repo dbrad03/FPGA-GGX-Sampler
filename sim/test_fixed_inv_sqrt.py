@@ -1,85 +1,25 @@
-import matplotlib.pyplot as plt
+#!/usr/bin/env python3
 import cocotb
-from cocotb.triggers import Timer, ClockCycles, RisingEdge, FallingEdge, ReadOnly,with_timeout
-from cocotb.clock import Clock
-import numpy as np
 import os
+import random
 import sys
+import logging
+import numpy as np
+from math import log
 from pathlib import Path
-from cocotb.binary import BinaryValue
-from cocotb.utils import get_sim_time as gst
+from cocotb.clock import Clock
+from cocotb.triggers import Timer, ClockCycles, RisingEdge, FallingEdge, ReadOnly, with_timeout
 from cocotb.runner import get_runner
+from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
-from cocotb_bus.monitors import Monitor
 from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
+from cocotb.binary import BinaryValue
 
 test_file = os.path.basename(__file__).replace(".py","")
 proj_path = Path(__file__).resolve().parent.parent
 
-FRAC_BITS = 32
-SCALE = 2.0**(FRAC_BITS - 1)
-
-def to_fixed(f):
-    f = np.clip(f, -0.999999, 0.999999)
-    return int(f * SCALE)
-
-def to_fixed_u32(f):
-    """ Converts float [0, 1) to Unsigned Q0.32 """
-    # Scale by 2^32 to use the full 32-bit integer range
-    f = np.clip(f, 0.0, 0.999999999)
-    return int(f * 4294967296.0) # 2^32
-    # return int(f * 2**32)
-
-def from_fixed(i):
-    if i >= (1 << (FRAC_BITS-1)): i -= (1 << FRAC_BITS)
-    return i / SCALE
-
-# --- GOLDEN MODEL ---
-def normalize(v):
-    v = np.asarray(v, dtype=np.float64)
-    n = np.linalg.norm(v)
-    if n == 0.0: return v
-    return v / n
-def ggx_vndf_spherical_caps(u1, u2, view, alpha):
-    view = normalize(np.asarray(view, dtype=np.float64))
-    alpha = float(alpha)
-    wi_std = normalize(np.array([view[0]*alpha, view[1], view[2]*alpha]))
-    phi = 2.0 * np.pi * u1
-    z = (1.0 - u2) * (1.0 + wi_std[2]) - wi_std[2]
-    sin_theta = np.sqrt(max(0.0, 1.0 - z*z))
-    x = sin_theta * np.cos(phi)
-    y = sin_theta * np.sin(phi)
-    c = np.array([x, y, z])
-    h_std = c + wi_std
-    h = normalize(np.array([h_std[0]*alpha, h_std[1], h_std[2]*alpha]))
-    return h
-
-# --- ROM GEN ---
-def ensure_roms_exist():
-    if not os.path.exists("inv_sqrt_rom.mem"):
-        print("Generating inv_sqrt_rom.mem...")
-        N = 1 << 8
-        with open("inv_sqrt_rom.mem", "w") as f:
-            for i in range(N):
-                u = (i + 0.5) / N
-                x = max(u, 1e-6)
-                y = (1.0 / np.sqrt(x)) * 0.25 
-                val = int(min(y, 0.9999999) * (1 << 31)) & 0xFFFFFFFF
-                f.write(f"{val:08x}\n")
-
-    if not os.path.exists("ggx_trig_rom.mem"):
-        print("Generating ggx_trig_rom.mem...")
-        N_TRIG = 1 << 10
-        with open("ggx_trig_rom.mem", "w") as f:
-            for i in range(N_TRIG):
-                u = i / N_TRIG
-                phi = 2.0 * np.pi * u
-                c = int(to_fixed(np.cos(phi))) & 0xFFFFFFFF
-                s = int(to_fixed(np.sin(phi))) & 0xFFFFFFFF
-                f.write(f"{c:08x}{s:08x}\n") # Cos High, Sin Low
-                
 class AXISMonitor(BusMonitor):
     """
     monitors axi streaming bus
@@ -108,7 +48,7 @@ class AXISMonitor(BusMonitor):
             if valid and ready:
                 self.transactions+=1
                 thing = dict(data=data.signed_integer,last=last,name=self.name,count=self.transactions,time=gst())
-                #print(f"{self.name}: {thing}")
+                # print(f"{self.name}: {thing}")
                 self._recv(data)
 
 class AXISDriver(BusDriver):
@@ -161,8 +101,8 @@ class AXISDriver(BusDriver):
                     if self.bus.axis_tready.value == 0:
                         await RisingEdge(self.bus.axis_tready)
                     await rising_edge
-                #self.bus.axis_tvalid.value = 0
-                #self.bus.axis_tlast.value = 0
+                self.bus.axis_tvalid.value = 0
+                self.bus.axis_tlast.value = 0
             else:
                 pass
         elif self.role == 'S':
@@ -192,107 +132,189 @@ async def reset(clk,rst, cycles_held = 3,polarity=1):
     rst.value = polarity
     await ClockCycles(clk, cycles_held)
     rst.value = not polarity
-    
-@cocotb.test()
-async def test_ggx_distribution(dut):
-    """Test GGX with many samples and plot distribution."""
-    rising_edge = RisingEdge(dut.s00_axis_aclk)
-    falling_edge = FallingEdge(dut.s00_axis_aclk)
-    
-    def to_float(raw):
-        if raw >= 0x80000000: raw -= 0x100000000
-        return raw / 2147483648.0 # Divide by 2^31
-    
-    received_packed_data = []
-    
-    inm = AXISMonitor(dut,'s00',dut.s00_axis_aclk)#, callback=debug_input)
-    outm = AXISMonitor(dut,'m00',dut.s00_axis_aclk, 
-                       callback=lambda x: received_packed_data.append(x.integer))
-    ind = AXISDriver(dut,'s00',dut.s00_axis_aclk,"M") #M driver for S port
-    # outd = AXISDriver(dut,'m00',dut.s00_axis_aclk,"S") #S driver for M port
-    
-    ensure_roms_exist()
-    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
-    await reset(dut.s00_axis_aclk,dut.s00_axis_aresetn,cycles_held=5,polarity=0)
 
-    # Config
-    alpha_val = 0.4
-    view_vec = [0.0, 1.0, 0.0] # Straight up view
+'''
+{"type":"write_single", "contents": {"data":5, "last":0}}
+{"type":"pause","duration":10}
+{"type":"write_burst", "contents": {"data": np.array(9*[0]+[1]+30*[0]+[-2]+59*[0])}}
+{"type":"read_single"}
+{"type":"read_burst", "duration":10}
+'''
+
+ADDR_BITS = 14
+N = 1 << ADDR_BITS
+X_MIN = 2**-15
+Q = 25
+S = 0.25
+SCALE = 1 << Q
+
+def to32(x): return x & 0xFFFFFFFF
+
+def float_to_q(x):
+    return to32(int(np.round(np.clip(x,0.0, 63.99999997) * SCALE)))
+
+def q_to_float(x):
+    x = to32(x)
+    if x & (1<<31):
+        x -= 1<<32
+    return x / SCALE
+
+def float_to_u32(x):
+    x = float(np.clip(x,0.0, np.nextafter(1.0,0.0)))
+    return to32(int(np.floor(x * (1<<32))))
+
+def inv_sqrt_ref(x):
+    """
+    Golden reference for inv_sqrt used in GGX.
+    x is float in [0, 1)
+    """
+    if x < X_MIN:
+        x = X_MIN
+        
+    idx = min(max(0,int(x*N)), N-1)
+    m = max(X_MIN,((idx+0.5)/N))
     
-    dut.alpha.value = to_fixed(alpha_val)
-    dut.view_x.value = to_fixed(view_vec[0])
-    dut.view_y.value = to_fixed(view_vec[1])
-    dut.view_z.value = to_fixed(view_vec[2])
-    dut.m00_axis_tready.value = 1
+        
+    y0 = S / np.sqrt(m)
+    y1 = y0 * (1.5 - x * y0 * y0 * 8.0)
+    return float(np.clip(y1,0.0,S/np.sqrt(X_MIN)))
+
+
+def ensure_rom_exists():
+    print("Generating inv_sqrt_rom.mem...")
     
-    dut._log.info("\n--- RUNNING PHASE SWEEP ---")
+    with open("inv_sqrt_rom.mem", "w") as f:
+        for i in range(N):
+            m = max((i + 0.5)/N, X_MIN)
+
+            y = S / np.sqrt(m)
+            y = min(y, (S/np.sqrt(X_MIN)))
+
+            val = to32(int(np.round(y * SCALE)))
+            f.write(f"{val:08x}\n")
+            
+@cocotb.test()
+async def test_inv_sqrt_axis(dut):
+    """Test axis_fixed_inv_sqrt using Scoreboard and Model Callback"""
+    ensure_rom_exists()
     
-    # Test 4 cardinal directions: 0.0, 0.25, 0.5, 0.75
-    points = [0, .25, .5, .6, .75, 0.9, 0.99]
+    # 1. Setup Signal Queues
+    sig_out_exp = [] # Expected transactions (Scoreboard queue)
+    sig_out_act = [] # Actual transactions (for debug logging only)
+
+    # 2. Define Model (Callback)
+    # This runs every time the input monitor sees a valid transaction
+    def inv_sqrt_model(transaction):
+        # Convert input
+        xu = to32(int(transaction))
+        x = xu / (1<<32)
+        # dut._log.info(f"IN  raw=0x{xu:08x} x={x:.10f}")
+        # dut._log.info(f"Model Input: {x:.6f}")
+        
+        y = inv_sqrt_ref(x)
+        exp_fixed = float_to_q(y)
+        
+        sig_out_exp.append((x,exp_fixed))
+
+        
+    def checker_callback(transaction):
+        """Pops expected result and compares with tolerance"""
+        if not sig_out_exp:
+            dut._log.error("Received transaction but no expected value available!")
+            assert False, "Queue Empty"
+
+        in_x, exp_fixed = sig_out_exp.pop(0)
+        exp_float = q_to_float(exp_fixed)
+        
+        act_fixed = to32(int(transaction))
+        act_float = q_to_float(act_fixed)
+        
+        diff = abs(act_float - exp_float)
+        TOLERANCE = 0.01
+
+        if diff > TOLERANCE:
+            dut._log.error(f"Mismatch! Input: {in_x:.6f} | Act: {act_float:.5f} Exp: {exp_float:.5f} Diff: {diff:.5f}")
+            assert False, "Value Mismatch"
+        else:
+            dut._log.info(f"OK! Input: {in_x:.6f} | Act: {act_float:.4f} Exp: {exp_float:.4f}")
+
+    # 3. Initialize Monitors & Drivers
+    inm = AXISMonitor(dut, 's00', dut.s00_axis_aclk, callback=inv_sqrt_model)
+    outm = AXISMonitor(dut, 'm00', dut.s00_axis_aclk, callback=checker_callback)
     
-    # We keep u1 constant to isolate rotation (u1)
-    u1_val = 0.5 
-    u1_fix = to_fixed_u32(u1_val) & 0xFFFFFFFF
+    ind = AXISDriver(dut, 's00', dut.s00_axis_aclk, "M")
+    outd = AXISDriver(dut, 'm00', dut.s00_axis_aclk, "S")
+
+    # 4. Start Simulation
+    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
+    await reset(dut.s00_axis_aclk, dut.s00_axis_aresetn, cycles_held=5, polarity=0)
+
+    # 5. Generate Data
+    N = 64
+    test_points = []
+    np.random.seed(42)
     
-    for u0_val in points:
-        u0_fix = to_fixed_u32(u0_val) & 0xFFFFFFFF
-        packed = (u1_fix << 32) | u0_fix
-        val = BinaryValue(value=packed, n_bits=64, bigEndian=False)
-        ind.append({'type': 'write_single', 'contents': {'data': val, 'last': 0}})
+    clamp_vectors = [0.0, 2**-20, 2**-16, 2**-15, 2**-15+2**-32, 2**-15*1.01]
+    lut_bin_vectors = []
+    for k in [0,1,2,3, 17, 123, 1024, (1<<ADDR_BITS)/2-1, (1<<ADDR_BITS)/2, (1<<ADDR_BITS)-2, (1<<ADDR_BITS)-1]:
+        lut_bin_vectors.append(k/(1<<ADDR_BITS))
+        lut_bin_vectors.append((k+0.5)/(1<<ADDR_BITS))
+        lut_bin_vectors.append((k+1)/(1<<ADDR_BITS))
+    midrange_vectors = [0.001, 0.01, 1/64, 1/16, 0.1, 0.25, 0.5, 0.75]
+    near1_vectors = [0.9, 0.99, 0.999, np.nextafter(1.0,0.0), 0xFFFFFFFF]
+    random_vectors = []
+    for _ in range(10):
+        random_vectors.append(np.random.uniform(low=0, high=2**-15))
+        random_vectors.append(np.random.uniform(low=2**-15, high=0.01))
+        random_vectors.append(np.random.uniform(low=0.01, high=0.5))
+        random_vectors.append(np.random.uniform(low=0.5, high=1.0))
         
-    # for _ in points:
-    #     outd.append({'type': "read_single"})
+    test_points.extend(clamp_vectors)
+    test_points.extend(lut_bin_vectors)
+    test_points.extend(midrange_vectors)
+    test_points.extend(near1_vectors)
+    test_points.extend(random_vectors)
+    input_data = [float_to_u32(v) for v in test_points]
     
-    while len(received_packed_data) < len(points):
-        await RisingEdge(dut.s00_axis_aclk)
-        await ReadOnly()
-        
-    for i, u0_val in enumerate(points):
-        received_raw = received_packed_data[i]
-        hx_raw = received_raw & 0xFFFFFFFF
-        hy_raw = (received_raw >> 32) & 0xFFFFFFFF
-        hz_raw = (received_raw >> 64) & 0xFFFFFFFF
-        rtl_x = to_float(hx_raw)
-        rtl_y = to_float(hy_raw)
-        rtl_z = to_float(hz_raw)
-        
-        # Calculate Reference (Z-Up)
-        ref_zup = ggx_vndf_spherical_caps(u0_val, 0.5, [0,1,0], alpha_val)
-        
-        # FIX B: Swizzle Reference to match RTL (Y-Up)
-        # Ref Z (Up)    -> RTL Y
-        # Ref Y (Depth) -> RTL Z
-        # Ref X (Side)  -> RTL X
-        ref_yup = [ref_zup[0], ref_zup[1], ref_zup[2]]
-        
-        dut._log.info(f"u0={u0_val:<4} | RTL: {rtl_x:>7.4f} {rtl_y:>7.4f} {rtl_z:>7.4f} | REF: {ref_yup[0]:>7.4f} {ref_yup[1]:>7.4f} {ref_yup[2]:>7.4f}")
-        
-        # Verify all three
-        # if not (np.isclose(rtl_x, ref_yup[0], atol=0.01) and 
-        #         np.isclose(rtl_y, ref_yup[1], atol=0.01) and 
-        #         np.isclose(rtl_z, ref_yup[2], atol=0.01)):
-        #      dut._log.error(f"MISMATCH AT u0={u0_val}")
-        
-   
-def ggx_runner():
-    """Simulate the GGX VNDF Streamer using the Python runner."""
+    # 6. Drive Sequence
+    # Send all inputs in a burst
+    ind.append({"type": "write_burst", "contents": {"data": input_data}})
+
+    # Read outputs with some backpressure ("pause") to stress the pipeline stall logic
+    outd.append({"type": "read_burst", "duration": 3}) 
+    outd.append({"type": "pause", "duration": 5})     # Backpressure for 5 clocks
+    outd.append({"type": "read_burst", "duration": len(input_data)}) # Read remainder
+
+    # 7. Wait for completion
+    # Wait enough cycles for pipeline latency + pauses
+    await ClockCycles(dut.s00_axis_aclk, N+50)
+
+    # 8. Assertions
+    # If sig_out_exp is not empty, it means we missed outputs.
+    assert len(sig_out_exp) == 0, f"Scoreboard mismatch! {len(sig_out_exp)} expected items remaining."
+    
+    # Ensure no data was lost (Input count == Output count)
+    assert inm.transactions == outm.transactions, \
+        f"Transaction count mismatch! In: {inm.transactions}, Out: {outm.transactions}"
+
+    dut._log.info("Test Passed with Approximation Tolerance!")
+
+def inv_sqrt_runner():
+    """Simulate the Inv Sqrt Module"""
     hdl_toplevel_lang = os.getenv("HDL_TOPLEVEL_LANG", "verilog")
     sim = os.getenv("SIM", "icarus")
-    # sim = os.getenv("SIM", "vivado")
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
     sources = [
-            proj_path / "hdl" / "axis_ggx_vndf.sv",
-            proj_path / "hdl" / "ggx_trig_lut.sv", 
-            proj_path / "hdl" / "fixed_inv_sqrt_newton.sv",
-            proj_path / "hdl" / "fixed_norm3.sv" 
+               proj_path / "hdl" / "axis_fixed_inv_sqrt.sv", 
             ] 
     
-    build_test_args = ["-Wall"], #"-I", str(proj_path / "hdl")]
-    parameters = {} #!!!
+    build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     sys.path.append(str(proj_path / "sim"))
     runner = get_runner(sim)
-    hdl_toplevel = "axis_ggx_vndf"
+    hdl_toplevel = "axis_fixed_inv_sqrt"
+    
+    parameters = {"ADDR_BITS": 14}
     runner.build(
         sources=sources,
         hdl_toplevel=hdl_toplevel,
@@ -309,6 +331,5 @@ def ggx_runner():
         test_args=run_test_args,
         waves=True
     )
-    
 if __name__ == "__main__":
-    ggx_runner()
+    inv_sqrt_runner()

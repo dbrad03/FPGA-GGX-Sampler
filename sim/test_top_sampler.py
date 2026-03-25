@@ -1,122 +1,24 @@
+#!/usr/bin/env python3
 import cocotb
 import os
 import random
 import sys
-from math import log
-import numpy
 import logging
-import matplotlib.pyplot as plt
+import numpy as np
+from math import log
 from pathlib import Path
 from cocotb.clock import Clock
-from cocotb.triggers import Timer, ClockCycles, RisingEdge, FallingEdge, ReadOnly,with_timeout
-from cocotb.utils import get_sim_time as gst
+from cocotb.triggers import Timer, ClockCycles, RisingEdge, FallingEdge, ReadOnly, with_timeout
 from cocotb.runner import get_runner
-# from vicoco.vivado_runner import get_runner
-#new!!!
+from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
-from cocotb_bus.monitors import Monitor
 from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
-import numpy as np
+from cocotb.binary import BinaryValue
+
 test_file = os.path.basename(__file__).replace(".py","")
-
 proj_path = Path(__file__).resolve().parent.parent
-
-FRAC_BITS = 32
-FRAC_ONE  = 1 << FRAC_BITS
-DIMS = 2
-
-def ctz(x: int) -> int:
-    """Count trailing zeros, 0 <= result < INDEX_BITS."""
-    if x == 0:
-        return 32
-    n = 0
-    while (x & 1) == 0:
-        x >>= 1
-        n += 1
-    return n
-
-class SobolInc:
-    """
-    Incremental Sobol, same recurrence as hardware:
-
-        x_{n+1}^{(d)} = x_n^{(d)} XOR V[d, ctz(n+1)]
-    """
-    def __init__(self, dir_table):
-        # dir_table: np.ndarray [DIMS, NUM_BITS] of uint32
-        self.dir_table = dir_table.astype(np.uint32)
-        self.num_dims, self.num_bits = self.dir_table.shape
-        self.index = 0
-        self.state = [0] * self.num_dims
-
-    def step_all(self):
-        """Advance one index, update ALL dims, return list of floats [0,1)."""
-        self.index += 1
-        bit = ctz(self.index)
-        if bit < self.num_bits:
-            for d in range(self.num_dims):
-                self.state[d] ^= int(self.dir_table[d, bit])
-        # return fixed-point ints too so we can pack exactly as RTL
-        return [s for s in self.state]
-
-def pack_sobol_sample(fixed_state, frac_bits=FRAC_BITS):
-    """
-    fixed_state: list of DIMS uint32 samples (Q0.FRAC_BITS).
-    Dimension 0 in lowest bits, etc. (same as << (d * FRAC_BITS)).
-    """
-    word = 0
-    for d, v in enumerate(fixed_state):
-        word |= (int(v) & ((1 << frac_bits) - 1)) << (d * frac_bits)
-    return word
-
-def unpack_sobol_sample(packed_val):
-    """
-    Unpacks a 64-bit word into two 32-bit integers.
-    Assumes dim 0 is in the lower 32 bits and dim 1 is in the upper 32 bits.
-    """
-    # Mask for 32 bits: 0xFFFFFFFF
-    mask32 = (1 << 32) - 1
-    
-    # Extract the lower 32 bits (Dimension 0)
-    dim0_val = packed_val & mask32
-    
-    # Shift right by 32 bits and extract the next 32 bits (Dimension 1)
-    dim1_val = (packed_val >> 32) & mask32
-    
-    return dim0_val, dim1_val
-    
-def sobol_direction_numbers_2d(frac_bits=32):
-    """
-    Returns a (2, frac_bits) array:
-    - dim 0: standard v[k] = 1 << (31-k)
-    - dim 1: based on primitive polynomial x^2 + x + 1
-    """
-    V = np.zeros((2, frac_bits), dtype=np.uint32)
-
-    # --- dimension 0 ---
-    for k in range(frac_bits):
-        V[0, k] = np.uint32(1 << (frac_bits - 1 - k))
-
-    # --- dimension 1 ---
-    # primitive polynomial: x^2 + x + 1  → degree s=2
-    s = 2
-    a = [1, 1]   # coefficients for x^1 and x^0 terms
-    m = [1, 3]   # initial direction numbers in integer form
-
-    # Load initial m’s into V
-    for k in range(s):
-        V[1, k] = np.uint32(m[k] << (frac_bits - k - 1))
-
-    # Generate remaining direction numbers
-    for k in range(s, frac_bits):
-        V[1, k] = np.uint32(V[1, k - s] ^ (V[1, k - s] >> s))
-        for j in range(1, s):
-            if a[j]:
-                V[1, k] ^= (V[1, k - j] >> j)
-
-    return V
-
 
 class AXISMonitor(BusMonitor):
     """
@@ -146,7 +48,7 @@ class AXISMonitor(BusMonitor):
             if valid and ready:
                 self.transactions+=1
                 thing = dict(data=data.signed_integer,last=last,name=self.name,count=self.transactions,time=gst())
-                #print(f"{self.name}: {thing}")
+                # print(f"{self.name}: {thing}")
                 self._recv(data)
 
 class AXISDriver(BusDriver):
@@ -199,8 +101,8 @@ class AXISDriver(BusDriver):
                     if self.bus.axis_tready.value == 0:
                         await RisingEdge(self.bus.axis_tready)
                     await rising_edge
-                #self.bus.axis_tvalid.value = 0
-                #self.bus.axis_tlast.value = 0
+                self.bus.axis_tvalid.value = 0
+                self.bus.axis_tlast.value = 0
             else:
                 pass
         elif self.role == 'S':
@@ -230,99 +132,88 @@ async def reset(clk,rst, cycles_held = 3,polarity=1):
     rst.value = polarity
     await ClockCycles(clk, cycles_held)
     rst.value = not polarity
+
+'''
+{"type":"write_single", "contents": {"data":5, "last":0}}
+{"type":"pause","duration":10}
+{"type":"write_burst", "contents": {"data": np.array(9*[0]+[1]+30*[0]+[-2]+59*[0])}}
+{"type":"read_single"}
+{"type":"read_burst", "duration":10}
+'''
+
+def u32(x): return x & 0xFFFFFFFF
+
+def pack64(w0=0, w1=0): return ((u32(w1)<<32) | u32(w0))
     
-sig_out_exp = []
+def unpack64(x): return u32(x), u32(x>>32)
+
 sig_out_act = []
+sig_out_exp = []
 
-def sobol_scatter(u, v, title):
-    plt.figure(figsize=(6,6))
-    plt.scatter(u, v, s=3, alpha=0.7, edgecolor="none")
-    plt.xlim(0,1)
-    plt.ylim(0,1)
-    plt.gca().set_aspect("equal")
-    plt.title(title)
-    plt.xlabel("u")
-    plt.ylabel("v")
-    plt.savefig("rtl_sobol_2d.png")
-
-def normalize_32bit_sobol(values):
-    """
-    Converts 32-bit integer values to floats in the range [0, 1].
-    """
-    # Convert input to a numpy array
-    arr = np.array(values)
+@cocotb.test
+async def test_top_level_sampler(dut):
+    """cocotb test for top level sampler"""
     
-    # If the array is signed int32, view it as unsigned uint32
-    # This ensures bit patterns like 0xFFFFFFFF are treated as ~4 billion, not -1
-    if arr.dtype == np.int32:
-        arr = arr.view(np.uint32)
+    def sampler_ctrl_model(transaction):
+        seed, upper_word = unpack64(transaction)
+        burst_len = upper_word & 0xFFFF
+        for i in range(burst_len+1):
+            packed_exp = pack64(w0=seed, w1=i)
+            sig_out_exp.append(BinaryValue(value=packed_exp, n_bits=64, bigEndian=False))
         
-    # Divide by 2^32 (4294967296)
-    return arr / 4294967296.0
-
-
-@cocotb.test()
-async def test_a(dut):
-    """cocotb test for AXIS FIR15"""
-    inm = AXISMonitor(dut,'s00',dut.s00_axis_aclk)
+        
+    inm = AXISMonitor(dut,'s00',dut.s00_axis_aclk, callback=sampler_ctrl_model)
     outm = AXISMonitor(dut,'m00',dut.s00_axis_aclk, callback=lambda x: sig_out_act.append(x))
     ind = AXISDriver(dut,'s00',dut.s00_axis_aclk,"M") #M driver for S port
     outd = AXISDriver(dut,'m00',dut.s00_axis_aclk,"S") #S driver for M port
     
-    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start()) 
-    await reset(dut.s00_axis_aclk,dut.s00_axis_aresetn,cycles_held=5, polarity=0)
+    scoreboard = Scoreboard(dut, fail_immediately=True)
+    scoreboard.add_interface(outm, sig_out_exp)
     
-    DIR_TABLE = sobol_direction_numbers_2d()
-    sobol = SobolInc(DIR_TABLE)
-    N = 2**11
+    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
+    await reset(dut.s00_axis_aclk, dut.s00_axis_aresetn, cycles_held=5, polarity=0)
     
-    for _ in range(N):
-        fixed_state = sobol.step_all()
-        sig_out_exp.append(pack_sobol_sample(fixed_state))
+    # --- TEST GENERATION ---
+    
+    # We want 65536 samples.
+    # Logic: indices 0..N -> N+1 samples.
+    # To get 65536 samples, we need indices 0..65535.
+    # So we send burst_length = 65535.
+    
+    N = 65536
+    burst_length = N-1
+    seed_val = 0x12345578
+    in_beats = [pack64(w0=seed_val,w1=burst_length)]
+    
+    ind.append({"type":"write_burst", "contents":{"data":in_beats}})
+    outd.append({"type":"read_burst", "duration":50})
+    outd.append({"type":"pause", "duration": 10})
+    outd.append({"type":"read_burst", "duration":N})
+    
+    await ClockCycles(dut.s00_axis_aclk, N+100)
+    assert len(sig_out_exp)==0
+    assert inm.transactions==1, f"Expected 1 command, got {inm.transactions}"
+    assert N==outm.transactions, \
+        f"Transaction count mismatch! Expected {N}, got {outm.transactions}"
 
-    pause = {"type": "pause","duration": 1}
-    outd.append({'type':'read_burst', 'duration':N})
-    outd.append(pause)
-    await ClockCycles(dut.s00_axis_aclk, N + 20)
-    assert len(sig_out_act) == len(sig_out_exp)
-     
-    u_sobol = []
-    v_sobol = []
-    for i, expected in enumerate(sig_out_exp):
-        actual = sig_out_act[i]
-        act0, act1 = unpack_sobol_sample(actual)
-        exp0, exp1 = unpack_sobol_sample(expected)
-        u_sobol.append(act0)
-        v_sobol.append(act1)
-        
-        try:
-            assert actual == expected
-        except AssertionError:
-            print(f"For dim 0.. expected {hex(exp0)}, got {hex(act0)}")
-            print(f"For dim 1.. expected {hex(exp1)}, got {hex(act1)}")
-
-    u_sobol = normalize_32bit_sobol(u_sobol)
-    v_sobol = normalize_32bit_sobol(v_sobol)
-    sobol_scatter(u_sobol, v_sobol, "Sobol 2D")
-            
+    dut._log.info(f"Test Passed: Top Level Sampler counts index and handles tlast")
     
-    
-def sobol_runner():
-    """Simulate the ADSB decoder using the Python runner."""
+def top_sampler_runner():
+    """Simulate the Top Level Sampler Controller"""
     hdl_toplevel_lang = os.getenv("HDL_TOPLEVEL_LANG", "verilog")
     sim = os.getenv("SIM", "icarus")
-    # sim = os.getenv("SIM", "vivado")
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
     sources = [
-               proj_path / "hdl" / "axis_sobol.sv", 
+               proj_path / "hdl" / "axis_top_lvl_sampler.sv", 
             ] 
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
-    parameters = {} #!!!
     sys.path.append(str(proj_path / "sim"))
     runner = get_runner(sim)
-    hdl_toplevel = "axis_sobol"
+    hdl_toplevel = "axis_top_lvl_sampler"
+    
+    parameters = {"C_S00_AXIS_TDATA_WIDTH": 64, "C_M00_AXIS_TDATA_WIDTH": 64}
     runner.build(
         sources=sources,
         hdl_toplevel=hdl_toplevel,
@@ -340,4 +231,4 @@ def sobol_runner():
         waves=True
     )
 if __name__ == "__main__":
-    sobol_runner()
+    top_sampler_runner()

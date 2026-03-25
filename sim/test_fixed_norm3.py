@@ -28,20 +28,22 @@ def from_fixed(i):
         i -= (1 << FRAC_BITS)
     return i / SCALE
 
-def ensure_rom_exists():
-    """Generates inv_sqrt_rom.mem if missing."""
-    # if os.path.exists("inv_sqrt_rom.mem"): return
-    
-    print("Generating inv_sqrt_rom.mem...")
-    N = 1 << 8 # ADDR_BITS = 8
-    with open("inv_sqrt_rom.mem", "w") as f:
+def ensure_rom_exists(filename, addr_bits=14):
+    """Generates inv_sqrt_rom.mem (16384-entry Q7.25) for axis_fixed_inv_sqrt."""
+    print(f"Generating {filename}...")
+    N = 1 << addr_bits
+    Q = 25
+    SCALE_ROM = 1 << Q
+    X_MIN = 2**-15
+    S = 0.25
+    from pathlib import Path as _Path
+    _Path(filename).parent.mkdir(parents=True, exist_ok=True)
+    with open(filename, "w") as f:
         for i in range(N):
-            u = (i + 0.5) / N
-            x = max(u, 1e-6)
-            # Scaling by 0.5 to fit in Q1.31 range
-            y = (1.0 / np.sqrt(x)) * 0.25
-            y = min(y,0.9999999)
-            val = int(y * (1<<31)) & 0xFFFFFFFF
+            m = max((i + 0.5) / N, X_MIN)
+            y = S / np.sqrt(m)
+            y = min(y, 63.99999997)
+            val = int(np.round(y * SCALE_ROM)) & 0xFFFFFFFF
             f.write(f"{val:08x}\n")
 
 # --- 2. TESTS ---
@@ -111,19 +113,19 @@ def norm_runner():
     """Simulate the Owen-Scrambling Streamer using the Python runner."""
     hdl_toplevel_lang = os.getenv("HDL_TOPLEVEL_LANG", "verilog")
     sim = os.getenv("SIM", "icarus")
-    # sim = os.getenv("SIM", "vivado")
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
+    ensure_rom_exists(proj_path / "sim" / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
     sources = [
-               proj_path / "hdl" / "fixed_inv_sqrt_newton.sv",
-               proj_path / "hdl" / "fixed_norm3.sv" 
-            ] 
-    
-    build_test_args = ["-Wall"], #"-I", str(proj_path / "hdl")]
-    parameters = {} #!!!
+               proj_path / "hdl" / "axis_fixed_norm3.sv",
+               proj_path / "hdl" / "axis_fixed_inv_sqrt.sv",
+            ]
+
+    build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
+    parameters = {}
     sys.path.append(str(proj_path / "sim"))
     runner = get_runner(sim)
-    hdl_toplevel = "fixed_norm3"
+    hdl_toplevel = "axis_fixed_norm3"
     runner.build(
         sources=sources,
         hdl_toplevel=hdl_toplevel,
