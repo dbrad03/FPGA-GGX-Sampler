@@ -17,6 +17,8 @@ test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
 
 Q31 = 2**31
+# Max tolerated |mean signed error| per component -- see the bias guard below.
+BIAS_TOL = 8e-06
 ADDR_BITS = 10
 NORM_X_MIN = 2**-15
 
@@ -555,6 +557,21 @@ async def test_ggx_control(dut):
     await ClockCycles(dut.s00_axis_aclk, 120 * expected_total)
 
     assert len(parser["beats"]) == 0, "Dangling partial command beats at end of test"
+    # Systematic-bias guard. Truncating fixed-point narrowing biases toward -inf,
+    # and unlike random noise that bias does NOT average out under Monte Carlo
+    # integration -- it is a permanent error in the sampled distribution. max_err
+    # is structurally blind to it, so assert on the signed mean directly.
+    # Measured with round-half-up narrowing: (+5.8e-07, -2.7e-06, -1.3e-06).
+    # This threshold is a regression guard on the ROUNDING, not a physical budget.
+    n_err = max(stats["n_err"], 1)
+    mean_signed = stats["signed_sum"] / n_err
+    assert np.all(np.abs(mean_signed) < BIAS_TOL), (
+        f"systematic bias exceeded {BIAS_TOL:.1e}: mean_signed="
+        f"({mean_signed[0]:+.3e},{mean_signed[1]:+.3e},{mean_signed[2]:+.3e}). "
+        "A fixed-point width change has likely reintroduced truncation in place of "
+        "round-half-up; check the rnd_* helpers and any bare >>> on a product."
+    )
+
     assert parser["cmd_count"] == len(cmds), f"expected {len(cmds)} commands, saw {parser['cmd_count']}"
     assert len(burst_sizes) == len(cmds), f"expected {len(cmds)} parsed bursts, saw {len(burst_sizes)}"
     assert len(expected_math) == 0, f"{len(expected_math)} expected output samples not observed"
