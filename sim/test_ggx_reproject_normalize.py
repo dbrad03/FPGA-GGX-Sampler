@@ -457,6 +457,7 @@ def reproject_normalize_runner():
 
     sources = [
         proj_path / "hdl" / "axis_ggx_reproject_normalize.sv",
+        proj_path / "hdl" / "axis_fifo_2deep.sv",
         proj_path / "hdl" / "axis_fixed_sqrt.sv",
         proj_path / "hdl" / "axis_fixed_div.sv",
         proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",

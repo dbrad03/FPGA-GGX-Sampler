@@ -51,7 +51,34 @@ module axis_nested_uniform_scramble #
   logic [SEED_WIDTH-1:0] seed_pipeline [0:10];
 
   logic [DATA_WIDTH-1:0] data_pipeline_d [1:4];
-  logic [DATA_WIDTH-1:0] lk_mul_1, lk_mul_2, lk_mul_3, lk_mul_4;
+
+  // Bit-exact 32x32 constant multiply split into 16-bit halves, so each partial
+  // product is a single 16x16 DSP with no cascade. See axis_hash_combine_2d for
+  // the derivation. Truncating operands is not valid here either: the Laine-Karras
+  // scramble relies on the full multiply to propagate entropy across all bits.
+  //   x*C = x_lo*C_lo + ((x_lo*C_hi + x_hi*C_lo) << 16)   (mod 2^32)
+  // cmul_pp lands in the existing lk_mul_* register, cmul_sum in the XOR stage
+  // that already follows it, so pipeline latency is unchanged.
+  function automatic [63:0] cmul_pp(input [31:0] x, input [31:0] c);
+    logic [31:0] p_ll, p_lh, p_hl;
+    begin
+      p_ll = x[15:0]  * c[15:0];
+      p_lh = x[15:0]  * c[31:16];
+      p_hl = x[31:16] * c[15:0];
+      cmul_pp = {p_hl[15:0], p_lh[15:0], p_ll};
+    end
+  endfunction
+
+  // The two middle partial products only ever affect bits [31:16], so this is a
+  // single ternary 16-bit add (one carry chain), not a 16-bit add feeding a
+  // 32-bit add. Bits [15:0] pass straight through from p_ll.
+  function automatic [31:0] cmul_sum(input [63:0] pp);
+    begin
+      cmul_sum = {pp[31:16] + pp[47:32] + pp[63:48], pp[15:0]};
+    end
+  endfunction
+
+  logic [63:0] lk_mul_1, lk_mul_2, lk_mul_3, lk_mul_4; // packed partial products
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
@@ -85,32 +112,32 @@ module axis_nested_uniform_scramble #
         data_pipeline[1]  <= data_pipeline[0] + seed_pipeline[0];
 
         // Cycle 2
-        lk_mul_1           <= data_pipeline[1] * LK_CONST_1;
+        lk_mul_1           <= cmul_pp(data_pipeline[1], LK_CONST_1);
         data_pipeline_d[1] <= data_pipeline[1];
 
         // Cycle 3
-        data_pipeline[2]   <= data_pipeline_d[1] ^ lk_mul_1;
+        data_pipeline[2]   <= data_pipeline_d[1] ^ cmul_sum(lk_mul_1);
 
         // Cycle 4
-        lk_mul_2           <= data_pipeline[2] * LK_CONST_2;
+        lk_mul_2           <= cmul_pp(data_pipeline[2], LK_CONST_2);
         data_pipeline_d[2] <= data_pipeline[2];
 
         // Cycle 5
-        data_pipeline[3]   <= data_pipeline_d[2] ^ lk_mul_2;
+        data_pipeline[3]   <= data_pipeline_d[2] ^ cmul_sum(lk_mul_2);
 
         // Cycle 6
-        lk_mul_3           <= data_pipeline[3] * LK_CONST_3;
+        lk_mul_3           <= cmul_pp(data_pipeline[3], LK_CONST_3);
         data_pipeline_d[3] <= data_pipeline[3];
 
         // Cycle 7
-        data_pipeline[4]   <= data_pipeline_d[3] ^ lk_mul_3;
+        data_pipeline[4]   <= data_pipeline_d[3] ^ cmul_sum(lk_mul_3);
 
         // Cycle 8
-        lk_mul_4           <= data_pipeline[4] * LK_CONST_4;
+        lk_mul_4           <= cmul_pp(data_pipeline[4], LK_CONST_4);
         data_pipeline_d[4] <= data_pipeline[4];
 
         // Cycle 9
-        data_pipeline[5]   <= data_pipeline_d[4] ^ lk_mul_4;
+        data_pipeline[5]   <= data_pipeline_d[4] ^ cmul_sum(lk_mul_4);
 
         // Cycle 10
         data_pipeline[6]   <= reverse_bits(data_pipeline[5]);
