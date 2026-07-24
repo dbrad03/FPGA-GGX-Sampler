@@ -59,12 +59,40 @@ module axis_ggx_reproject_normalize #
     end
   endfunction
 
+  // Quantized to a single DSP48E1 (18b x 25b), same as sq_q131_to_q262 below.
+  // A full 32x32 product needs a 4-DSP cascade whose A->PCOUT delay is 4.21 ns
+  // with zero logic levels, so it cannot be pipelined below the 5 ns target --
+  // it has to be narrowed instead. Q1.31 x Q1.31 -> Q2.62, low bits zero-filled.
   function automatic logic signed [63:0] mul_q131_q131_to_q262(
     input logic signed [31:0] q131_a,
     input logic signed [31:0] q131_b
   );
+    logic signed [17:0] a_18;       // Q1.17
+    logic signed [24:0] b_25;       // Q1.24
+    logic signed [42:0] prod_q2_41; // Q2.41
     begin
-      mul_q131_q131_to_q262 = $signed(q131_a) * $signed(q131_b);
+      a_18       = q131_a[31:14];
+      b_25       = q131_b[31:7];
+      prod_q2_41 = a_18 * b_25;                       // Q1.17 * Q1.24 -> Q2.41
+      mul_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21; // Q2.41 -> Q2.62
+    end
+  endfunction
+
+  // Quantized square: truncate the operand to 18b and 25b so the product fits
+  // ONE DSP48E1 (auto AREG/MREG/PREG, no fabric cascade). Q1.31 -> Q2.62 with
+  // the low bits zero-filled. Both truncations keep the operand's sign, so the
+  // result stays non-negative exactly as a true square does.
+  function automatic logic signed [63:0] sq_q131_to_q262(
+    input logic signed [31:0] q131
+  );
+    logic signed [17:0] a_18;       // Q1.17
+    logic signed [24:0] b_25;       // Q1.24
+    logic signed [42:0] prod_q2_41; // Q2.41
+    begin
+      a_18       = q131[31:14];
+      b_25       = q131[31:7];
+      prod_q2_41 = a_18 * b_25;                 // Q1.17 * Q1.24 -> Q2.41
+      sq_q131_to_q262 = 64'(prod_q2_41) <<< 21; // Q2.41 -> Q2.62
     end
   endfunction
 
@@ -131,8 +159,8 @@ module axis_ggx_reproject_normalize #
 
   wire signed [31:0] a0_t1_q131 = $signed(a0_data[31:0]);
   wire signed [31:0] a0_t2_q131 = $signed(a0_data[63:32]);
-  wire signed [63:0] a1a_t1_sq_q262_s_w = $signed(a0_t1_q131) * $signed(a0_t1_q131);
-  wire signed [63:0] a1a_t2_sq_q262_s_w = $signed(a0_t2_q131) * $signed(a0_t2_q131);
+  wire signed [63:0] a1a_t1_sq_q262_s_w = sq_q131_to_q262(a0_t1_q131);
+  wire signed [63:0] a1a_t2_sq_q262_s_w = sq_q131_to_q262(a0_t2_q131);
   // t1^2 and t2^2 are non-negative for any input (even (-1.0)^2 = +1.0), so the
   // old sign-bit clamp to zero was dead logic on a register reset path; drop it.
   wire [63:0] a1_t1_sq_q262_u_w = $unsigned(a1a_t1_sq_q262_s);
