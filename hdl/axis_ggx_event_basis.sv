@@ -111,6 +111,22 @@ module axis_ggx_event_basis #
 		end
 	endfunction
 
+	// Same product, but the operands are ALREADY narrowed and rounded (registered
+	// upstream). The round-half-up increment is a ~7-deep carry chain; when it sits
+	// between an operand register and the DSP it becomes the critical path (WNS
+	// -4.151). Doing the rounding one stage earlier, into a register, leaves only a
+	// clean reg -> DSP path here. Q1.17 x Q1.24 -> Q2.62.
+	function automatic logic signed [63:0] mul_pre_q131_q131_to_q262(
+		input logic signed [17:0] a_18,
+		input logic signed [24:0] b_25
+	);
+		logic signed [42:0] prod_q2_41;
+		begin
+				prod_q2_41 = a_18 * b_25;
+				mul_pre_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;
+		end
+	endfunction
+
 	function automatic logic signed [63:0] mul_q131_q725_to_q856(
 		input logic signed [31:0] q131,
 		input logic 			 [31:0] q725
@@ -357,6 +373,11 @@ module axis_ggx_event_basis #
 	logic signed [63:0] t1a_x, t1a_y;
 	logic signed [63:0] t1b_x_shift, t1b_y_shift;
 	logic signed [31:0] t1c_x, t1c_y;
+	// Pre-rounded, pre-narrowed operands for the stage-5a DSP multiplies, computed
+	// here in 4c (where t1c / Vh_42 are already being registered) so the rounding
+	// carry chain does not sit on the reg -> DSP path in 5a. No added latency.
+	logic signed [24:0] t1c_x_r25, t1c_y_r25;
+	logic signed [17:0] vh42_z_r18, vh42_x_r18, vh42_y_r18;
 	logic [95:0] Vh_40, Vh_41, Vh_42;
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
@@ -369,6 +390,8 @@ module axis_ggx_event_basis #
 			t1a_x <= '0; t1a_y <= '0;
 			t1b_x_shift <= '0; t1b_y_shift <= '0;
 			t1c_x <= '0; t1c_y <= '0;
+			t1c_x_r25 <= '0; t1c_y_r25 <= '0;
+			vh42_z_r18 <= '0; vh42_x_r18 <= '0; vh42_y_r18 <= '0;
 			Vh_40 <= '0; Vh_41 <= '0; Vh_42 <= '0;
 		end else if (pipe_en) begin
 			s4a_valid <= inv_out_valid;
@@ -395,9 +418,16 @@ module axis_ggx_event_basis #
 			if (s4b_valid) begin
 				use_inv_sqrt_42 <= use_inv_sqrt_41;
 				Vh_42 <= Vh_41;
+				// Round Vh_41's three components into the 18-bit DSP operands here,
+				// off the 5a reg -> DSP path (Vh_42 <= Vh_41, so round Vh_41).
+				vh42_z_r18 <= rnd_s18($signed(Vh_41[95:64]));
+				vh42_x_r18 <= rnd_s18($signed(Vh_41[31:0]));
+				vh42_y_r18 <= rnd_s18($signed(Vh_41[63:32]));
 				if (use_inv_sqrt_41) begin
 					t1c_x <= satq131(t1b_x_shift);
 					t1c_y <= satq131(t1b_y_shift);
+					t1c_x_r25 <= rnd_s25(satq131(t1b_x_shift));
+					t1c_y_r25 <= rnd_s25(satq131(t1b_y_shift));
 				end
 			end
 		end
@@ -434,10 +464,10 @@ module axis_ggx_event_basis #
 				Vh_50 <= Vh_42;
 				use_inv_sqrt_50 <= use_inv_sqrt_42;
 				if (use_inv_sqrt_42) begin
-					t2a_x  <= mul_q131_q131_to_q262($signed(Vh_42[95:64]), t1c_y);
-					t2a_y  <= mul_q131_q131_to_q262($signed(Vh_42[95:64]), t1c_x);
-					t2a_z0 <= mul_q131_q131_to_q262($signed(Vh_42[31:0]),  t1c_y);
-					t2a_z1 <= mul_q131_q131_to_q262($signed(Vh_42[63:32]), t1c_x);
+					t2a_x  <= mul_pre_q131_q131_to_q262(vh42_z_r18, t1c_y_r25);
+					t2a_y  <= mul_pre_q131_q131_to_q262(vh42_z_r18, t1c_x_r25);
+					t2a_z0 <= mul_pre_q131_q131_to_q262(vh42_x_r18, t1c_y_r25);
+					t2a_z1 <= mul_pre_q131_q131_to_q262(vh42_y_r18, t1c_x_r25);
 					T1_out0 <= {32'b0, t1c_y, t1c_x};
 				end else begin
 					T1_out0 <= {32'b0, 32'b0, ONE_Q1};
