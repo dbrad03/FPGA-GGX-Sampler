@@ -48,7 +48,6 @@ module axis_fixed_norm3#
 		output logic [(C_S00_AXIS_TDATA_WIDTH/8)-1: 0] m00_axis_tstrb
 	);
 
-  localparam integer INV_SQRT_LATENCY = 9; // +1 for axis_fixed_inv_sqrt input register stage
   // localparam logic [31:0] LENSQ_MIN_UQ0_32 = 32'h0004_0000; // 1/128^2
   localparam logic [31:0] LENSQ_MIN_UQ0_32 = 32'h0002_0000; // 2**-15
 
@@ -118,11 +117,54 @@ module axis_fixed_norm3#
     end
   end
 
-  /// STAGE 01: conpute x^2 + y^2 + z^2-> UQ0.32
-  logic [65:0] lensq_q2_62; // sum with headroom
-  // logic [31:0] lensq_q0_32;
-  assign lensq_q2_62 = {2'b0, x2} + {2'b0, y2} + {2'b0, z2};
-  
+  /// STAGE 01a0: partial sum x^2 + y^2. Split from the 3-way sum so the two
+  /// 64-bit carry chains no longer chain within one cycle (this was the -0.827
+  /// ns lensq critical path). z^2 and the x/y/z passthrough are delayed one
+  /// stage to stay aligned.
+  logic [64:0]        xy2_sum;
+  logic [63:0]        z2_d;
+  logic signed [31:0] x000, y000, z000;
+  logic               sq_valid_0;
+
+  always_ff @(posedge s00_axis_aclk) begin
+    if (s00_axis_aresetn==0) begin
+      sq_valid_0 <= 1'b0;
+      xy2_sum <= '0; z2_d <= '0;
+      x000 <= '0; y000 <= '0; z000 <= '0;
+    end else if (norm_en) begin
+      sq_valid_0 <= dims_sq_valid;
+      if (dims_sq_valid) begin
+        xy2_sum <= {1'b0, x2} + {1'b0, y2};
+        z2_d    <= z2;
+        x000 <= x00; y000 <= y00; z000 <= z00;
+      end
+    end
+  end
+
+  /// STAGE 01a: final sum (+ z^2)
+  logic [65:0] lensq_q2_62;
+  logic signed [31:0] x01a, y01a, z01a;
+  logic              lensq_valid_a;
+
+  always_ff @(posedge s00_axis_aclk) begin
+    if (s00_axis_aresetn==0) begin
+      lensq_valid_a <= 1'b0;
+      lensq_q2_62   <= '0;
+      x01a <= 0;
+      y01a <= 0;
+      z01a <= 0;
+    end else if (norm_en) begin
+      lensq_valid_a <= sq_valid_0;
+      if (sq_valid_0) begin
+        lensq_q2_62 <= {1'b0, xy2_sum} + {2'b0, z2_d};
+        x01a <= x000;
+        y01a <= y000;
+        z01a <= z000;
+      end
+    end
+  end
+
+  /// MSB Index and Shift logic on registered sum lensq_q2_62
   logic [3:0] lensq_shift;
   logic [6:0] msb_idx;
   always_comb begin
@@ -134,18 +176,18 @@ module axis_fixed_norm3#
     if (msb_idx <= 61) begin
       lensq_shift = 0;
     end else begin
-      // ceil( (msb_idx - 61) / 2 )
       logic [6:0] d;
       d = msb_idx - 7'd61;
       lensq_shift = (d[0]) ? ( (d>>1) + 1 ) : (d>>1);
     end
   end
+
   logic [65:0] lensq_q2_62_shifted;
   logic [31:0] lensq_q0_32_shifted;
   assign lensq_q2_62_shifted = lensq_q2_62 >> (lensq_shift << 1);
-  assign lensq_q0_32_shifted = lensq_q2_62_shifted[61:30]; // should be < 1.0
+  assign lensq_q0_32_shifted = lensq_q2_62_shifted[61:30];
 
-
+  /// STAGE 01b: register shift and shifted lensq
   logic signed [31:0] x01, y01, z01;
   logic [3:0] lensq_shift_reg;
   logic [31:0] lensq_u32;
@@ -154,17 +196,19 @@ module axis_fixed_norm3#
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
       lensq_valid <= 1'b0;
+      lensq_shift_reg <= '0;
+      lensq_u32 <= '0;
       x01 <= 0;
       y01 <= 0;
       z01 <= 0;
     end else if (norm_en) begin
-      lensq_valid <= dims_sq_valid;
-      if (dims_sq_valid) begin
+      lensq_valid <= lensq_valid_a;
+      if (lensq_valid_a) begin
         lensq_shift_reg <= lensq_shift;
         lensq_u32 <= lensq_q0_32_shifted;
-        x01 <= x00;
-        y01 <= y00;
-        z01 <= z00;
+        x01 <= x01a;
+        y01 <= y01a;
+        z01 <= z01a;
       end
     end
   end
@@ -175,8 +219,12 @@ module axis_fixed_norm3#
   logic [31:0] lensq_u32_clamped;
   assign lensq_u32_clamped = (lensq_u32 < LENSQ_MIN_UQ0_32) ? LENSQ_MIN_UQ0_32 : lensq_u32;
   logic [31:0] inv_len_q7_25;
+  wire         [3:0] delayed_shift;
+  wire signed [31:0] delayed_x;
+  wire signed [31:0] delayed_y;
+  wire signed [31:0] delayed_z;
 
-  axis_fixed_inv_sqrt # (
+  axis_fixed_inv_sqrt_nodsp # (
     .FRAC_BITS(FRAC_BITS),
     .ADDR_BITS(14)
   ) u_inv_sqrt (
@@ -188,57 +236,24 @@ module axis_fixed_norm3#
     .s00_axis_tstrb('1),
     .s00_axis_tready(inv_in_ready),
 
+    .s00_axis_user_x(x01),
+    .s00_axis_user_y(y01),
+    .s00_axis_user_z(z01),
+    .s00_axis_user_shift(lensq_shift_reg),
+
     .m00_axis_aclk(s00_axis_aclk),
     .m00_axis_aresetn(s00_axis_aresetn),
     .m00_axis_tlast(),
     .m00_axis_tvalid(inv_out_valid),
     .m00_axis_tdata(inv_len_q7_25),
     .m00_axis_tstrb(),
-    .m00_axis_tready(pipe_en)
+    .m00_axis_tready(pipe_en),
+
+    .m00_axis_user_x(delayed_x),
+    .m00_axis_user_y(delayed_y),
+    .m00_axis_user_z(delayed_z),
+    .m00_axis_user_shift(delayed_shift)
   );
-
-  /// DELAY INPUTS TO MATCH INV_SQRT LATENCY
-  
-  logic         [3:0] delay_shift [0:INV_SQRT_LATENCY-1];
-  logic signed [31:0] delay_x     [0:INV_SQRT_LATENCY-1];
-  logic signed [31:0] delay_y     [0:INV_SQRT_LATENCY-1];
-  logic signed [31:0] delay_z     [0:INV_SQRT_LATENCY-1];
-
-  integer k;
-  always_ff @(posedge s00_axis_aclk) begin
-    if (s00_axis_aresetn==0) begin
-      for (k=0; k<INV_SQRT_LATENCY; k=k+1) begin
-        delay_shift[k] <= 0;
-        delay_x[k] <= 0;
-        delay_y[k] <= 0;
-        delay_z[k] <= 0;
-      end
-    end else if (pipe_en) begin
-      if (lensq_valid && inv_in_ready) begin
-        delay_shift[0] <= lensq_shift_reg;
-        delay_x[0] <= x01;
-        delay_y[0] <= y01;
-        delay_z[0] <= z01;
-      end else begin
-        delay_shift[0] <= '0;
-        delay_x[0] <= '0;
-        delay_y[0] <= '0;
-        delay_z[0] <= '0;
-      end
-
-      for (k=1; k<INV_SQRT_LATENCY; k=k+1) begin
-          delay_shift[k] <= delay_shift[k-1];
-          delay_x[k] <= delay_x[k-1];
-          delay_y[k] <= delay_y[k-1];
-          delay_z[k] <= delay_z[k-1];
-      end
-    end
-  end
-
-  wire         [3:0] delayed_shift = delay_shift[INV_SQRT_LATENCY-1];
-  wire signed [31:0] delayed_x     = delay_x[INV_SQRT_LATENCY-1];
-  wire signed [31:0] delayed_y     = delay_y[INV_SQRT_LATENCY-1];
-  wire signed [31:0] delayed_z     = delay_z[INV_SQRT_LATENCY-1];
 
   /// FINAL MULTIPLY
   /// (Q1.32 signed * Q7.25 unsigned) -> Q8.56 signed
@@ -259,12 +274,14 @@ module axis_fixed_norm3#
     input logic signed [31:0] q131,  // Q1.31
     input logic        [31:0] q725   // Q7.25
   );
-    logic signed [32:0] inv_scaled_q725;
-    logic signed [63:0] prod_q8_56;
+    logic signed [17:0] q131_18;
+    logic signed [24:0] q725_25;
+    logic signed [42:0] prod_q8_34;
     begin
-      inv_scaled_q725 = $signed({1'b0, q725});
-      prod_q8_56 = $signed(q131) * inv_scaled_q725; // Q8.56 + extra bits
-      mul_q131_q725_to_q856 = prod_q8_56;
+      q131_18 = q131[31:14];
+      q725_25 = $signed({1'b0, q725[31:8]});
+      prod_q8_34 = q131_18 * q725_25;
+      mul_q131_q725_to_q856 = 64'(prod_q8_34) <<< 22;
     end
   endfunction
 
