@@ -94,12 +94,21 @@ module axis_fixed_norm3#
   logic        [63:0] x2, y2, z2;        // magnitude squared Q2.62 (unsigned)
   logic        [31:0] x00, y00, z00;     // registered input copy for downstream alignment
   logic              dims_sq_valid;
-  wire signed [63:0] x_in_r_wide = {{32{x_in_r[31]}}, x_in_r};
-  wire signed [63:0] y_in_r_wide = {{32{y_in_r[31]}}, y_in_r};
-  wire signed [63:0] z_in_r_wide = {{32{z_in_r[31]}}, z_in_r};
-  wire signed [63:0] x2_w = x_in_r_wide * x_in_r_wide;
-  wire signed [63:0] y2_w = y_in_r_wide * y_in_r_wide;
-  wire signed [63:0] z2_w = z_in_r_wide * z_in_r_wide;
+  // Quantize the square operands to 18-bit (Q1.17 = top 18 bits of the Q1.31
+  // input). An 18x18 multiply fits a SINGLE DSP48E1 (25x18), which Vivado fully
+  // pipelines internally (AREG/MREG/PREG) -- no fabric cascade -- so it closes
+  // timing AND drops from 4 DSPs to 1 per square. The Q2.34 product is shifted
+  // back up to Q2.62 so the downstream lensq/shift logic is unchanged. 17-bit
+  // magnitude precision is far inside the 0.065 sampling tolerance.
+  wire signed [17:0] x18 = x_in_r[31:14];
+  wire signed [17:0] y18 = y_in_r[31:14];
+  wire signed [17:0] z18 = z_in_r[31:14];
+  wire signed [35:0] x18_sq = x18 * x18; // Q2.34, single DSP
+  wire signed [35:0] y18_sq = y18 * y18;
+  wire signed [35:0] z18_sq = z18 * z18;
+  wire signed [63:0] x2_w = {x18_sq, 28'b0}; // Q2.34 -> Q2.62
+  wire signed [63:0] y2_w = {y18_sq, 28'b0};
+  wire signed [63:0] z2_w = {z18_sq, 28'b0};
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
