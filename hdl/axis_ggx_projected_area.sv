@@ -47,41 +47,6 @@ module axis_ggx_projected_area #
   wire [31:0] in_u2_uq032 = s00_axis_tdata[63:32];
   wire signed [31:0] in_vhz_q131 = $signed(s00_axis_tdata[95:64]);
 
-  // ---------------------------------------------------------------------------
-  // Round-half-up operand narrowing.
-  //
-  // Plain bit-slicing truncates toward -inf, so the quantisation error is not
-  // zero-mean: measured on the full pipeline it showed up as a systematic bias
-  // (mean_signed z = -1.4e-05, ~97% of total error) that Monte Carlo averaging
-  // will NOT remove, unlike random noise. Adding the MSB of the discarded field
-  // makes the error zero-mean. The cost is an increment on the narrowed value,
-  // not a full-width add, which keeps the DSP input path cheap. The equality
-  // guard stops the increment overflowing the narrowed width at top of range.
-  // ---------------------------------------------------------------------------
-  function automatic logic signed [17:0] rnd_s18(input logic signed [31:0] a);
-    logic signed [17:0] t;
-    begin
-      t = $signed(a[31:14]);
-      rnd_s18 = (a[13] && t != 18'sh1FFFF) ? t + 18'sh00001 : t;
-    end
-  endfunction
-
-  function automatic logic signed [23:0] rnd_s24(input logic signed [31:0] a);
-    logic signed [23:0] t;
-    begin
-      t = $signed(a[31:8]);
-      rnd_s24 = (a[7] && t != 24'sh7FFFFF) ? t + 24'sh000001 : t;
-    end
-  endfunction
-
-  function automatic logic signed [17:0] rnd_u18(input logic [31:0] u);
-    logic [16:0] t;
-    begin
-      t = u[31:15];
-      rnd_u18 = $signed({1'b0, ((u[14] && t != 17'h1FFFF) ? t + 17'h00001 : t)});
-    end
-  endfunction
-
   function automatic logic signed [31:0] satq131(input logic signed [63:0] val);
     begin
       if (val > $signed(64'sh0000_0000_7FFF_FFFF)) satq131 = ONE_Q1;
@@ -98,12 +63,10 @@ module axis_ggx_projected_area #
     logic signed [17:0] uq032_18;
     logic signed [41:0] prod;
     begin
-      q131_24 = rnd_s24(q131);
-      uq032_18 = rnd_u18(uq032);
+      q131_24 = q131[31:8];
+      uq032_18 = $signed({1'b0, uq032[31:15]});
       prod = q131_24 * uq032_18;     // Q1.23 * Q0.17 -> Q1.40
-      // Round-half-up (see rnd_* helpers): bare >>> truncates toward -inf.
-      // The constant add maps to the DSP48E1 C port, so it costs no fabric.
-      mul_q131_uq032_to_q131 = (prod + 42'sh100) >>> 9; // Q1.40 -> Q1.31
+      mul_q131_uq032_to_q131 = prod >>> 9; // Q1.40 -> Q1.31
     end
   endfunction
 
@@ -116,10 +79,9 @@ module axis_ggx_projected_area #
     logic signed [42:0] prod;
     begin
       a_25 = $signed({1'b0, uq032_a[31:9]}); // 24-bit unsigned -> 25-bit signed
-      b_18 = rnd_u18(uq032_b);
+      b_18 = $signed({1'b0, uq032_b[31:15]}); // 17-bit unsigned -> 18-bit signed
       prod = a_25 * b_18;                    // Q0.23 * Q0.17 -> Q0.40
-      // Round-half-up (see rnd_* helpers): bare >>> truncates toward -inf.
-      mul_uq032_uq032_to_uq032 = (prod + 43'sh80) >>> 8; // Q0.40 -> Q0.32
+      mul_uq032_uq032_to_uq032 = prod >>> 8; // Q0.40 -> Q0.32
     end
   endfunction
 
@@ -131,8 +93,8 @@ module axis_ggx_projected_area #
     logic signed [17:0] b_18;
     logic signed [41:0] prod;
     begin
-      a_24 = rnd_s24(q131_a);
-      b_18 = rnd_s18(q131_b);
+      a_24 = q131_a[31:8];
+      b_18 = q131_b[31:14];
       prod = a_24 * b_18; // Q1.23 * Q1.17 -> Q2.40
       mul_q131_q131_to_q262 = 64'(prod) <<< 22; // Q2.40 -> Q2.62
     end
