@@ -39,9 +39,43 @@ module axis_ggx_event_basis #
 	wire signed [31:0] view_y_in = s00_axis_tdata[63:32];
 	wire signed [31:0] view_x_in = s00_axis_tdata[31:0];
 
-	// Quantized to a single DSP48E1: truncate operands to 18b x 25b so the
-	// product fits one DSP (auto AREG/MREG/PREG, no fabric cascade). Q1.31 in,
-	// Q1.31 out; huge headroom (tol 0.065 vs err ~3e-5) makes 17/24-bit safe.
+  // ---------------------------------------------------------------------------
+  // Round-half-up operand narrowing.
+  //
+  // Plain bit-slicing truncates toward -inf, so the quantisation error is not
+  // zero-mean: measured on the full pipeline it showed up as a systematic bias
+  // (mean_signed z = -1.4e-05, ~97% of total error) that Monte Carlo averaging
+  // will NOT remove, unlike random noise. Adding the MSB of the discarded field
+  // makes the error zero-mean. The cost is an increment on the narrowed value,
+  // not a full-width add, which keeps the DSP input path cheap. The equality
+  // guard stops the increment overflowing the narrowed width at top of range.
+  // ---------------------------------------------------------------------------
+  function automatic logic signed [17:0] rnd_s18(input logic signed [31:0] a);
+    logic signed [17:0] t;
+    begin
+      t = $signed(a[31:14]);
+      rnd_s18 = (a[13] && t != 18'sh1FFFF) ? t + 18'sh00001 : t;
+    end
+  endfunction
+
+  function automatic logic signed [24:0] rnd_s25(input logic signed [31:0] a);
+    logic signed [24:0] t;
+    begin
+      t = $signed(a[31:7]);
+      rnd_s25 = (a[6] && t != 25'sh0FFFFFF) ? t + 25'sh0000001 : t;
+    end
+  endfunction
+
+  function automatic logic signed [24:0] rnd_u25(input logic [31:0] u);
+    logic [23:0] t;
+    begin
+      t = u[31:8];
+      rnd_u25 = $signed({1'b0, ((u[7] && t != 24'hFFFFFF) ? t + 24'h000001 : t)});
+    end
+  endfunction
+
+	// Quantized to a single DSP48E1 (18b x 25b) with round-half-up operands, so
+	// the product needs no fabric cascade. Q1.31 x UQ0.32 -> Q1.31.
 	function automatic logic signed [31:0] mul_q131_uq032_to_q131(
 		input logic signed [31:0] q131,
 		input logic 			 [31:0] uq032
@@ -50,15 +84,18 @@ module axis_ggx_event_basis #
 		logic signed [24:0] uq032_25;   // UQ0.24 (positive)
 		logic signed [42:0] prod_q1_41; // Q1.41
 		begin
-				q131_18    = q131[31:14];
-				uq032_25   = $signed({1'b0, uq032[31:8]});
+				q131_18    = rnd_s18(q131);
+				uq032_25   = rnd_u25(uq032);
 				prod_q1_41 = q131_18 * uq032_25;                 // Q1.17 * UQ0.24 -> Q1.41
-				mul_q131_uq032_to_q131 = 32'(prod_q1_41 >>> 10); // Q1.41 -> Q1.31
+				// Round-half-up on the product too: a bare >>> truncates toward -inf and
+			// reintroduces the same systematic bias the operand rounding removes.
+			// The constant add maps to the DSP48E1 C port, so it costs no fabric.
+			mul_q131_uq032_to_q131 = 32'((prod_q1_41 + 43'sh200) >>> 10); // Q1.41 -> Q1.31
 		end
 	endfunction
 
-	// Quantized to a single DSP48E1 (18b x 25b). Q1.31 x Q1.31 -> Q2.62,
-	// with the low bits zero-filled (precision loss << tolerance headroom).
+	// Quantized to a single DSP48E1 (18b x 25b) with round-half-up operands.
+	// Q1.31 x Q1.31 -> Q2.62, low bits zero-filled.
 	function automatic logic signed [63:0] mul_q131_q131_to_q262(
 		input logic signed [31:0] q131_a,
 		input logic signed [31:0] q131_b
@@ -67,8 +104,8 @@ module axis_ggx_event_basis #
 		logic signed [24:0] b_25;       // Q1.24
 		logic signed [42:0] prod_q2_41; // Q2.41
 		begin
-				a_18       = q131_a[31:14];
-				b_25       = q131_b[31:7];
+				a_18       = rnd_s18(q131_a);
+				b_25       = rnd_s25(q131_b);
 				prod_q2_41 = a_18 * b_25;                        // Q1.17 * Q1.24 -> Q2.41
 				mul_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;  // Q2.41 -> Q2.62
 		end
@@ -82,8 +119,8 @@ module axis_ggx_event_basis #
 		logic signed [24:0] q725_25;
 		logic signed [42:0] prod_q8_34;
 		begin
-			q131_18 = q131[31:14];
-			q725_25 = $signed({1'b0, q725[31:8]});
+			q131_18 = rnd_s18(q131);
+			q725_25 = rnd_u25(q725);
 			prod_q8_34 = q131_18 * q725_25;
 			mul_q131_q725_to_q856 = 64'(prod_q8_34) <<< 22;
 		end

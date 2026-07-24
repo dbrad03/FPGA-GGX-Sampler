@@ -100,9 +100,36 @@ module axis_fixed_norm3#
   // timing AND drops from 4 DSPs to 1 per square. The Q2.34 product is shifted
   // back up to Q2.62 so the downstream lensq/shift logic is unchanged. 17-bit
   // magnitude precision is far inside the 0.065 sampling tolerance.
-  wire signed [17:0] x18 = x_in_r[31:14];
-  wire signed [17:0] y18 = y_in_r[31:14];
-  wire signed [17:0] z18 = z_in_r[31:14];
+  // ---------------------------------------------------------------------------
+  // Round-half-up operand narrowing.
+  //
+  // Plain bit-slicing truncates toward -inf, so the quantisation error is not
+  // zero-mean: measured on the full pipeline it showed up as a systematic bias
+  // (mean_signed z = -1.4e-05, ~97% of total error) that Monte Carlo averaging
+  // will NOT remove, unlike random noise. Adding the MSB of the discarded field
+  // makes the error zero-mean. The cost is an increment on the narrowed value,
+  // not a full-width add, which keeps the DSP input path cheap. The equality
+  // guard stops the increment overflowing the narrowed width at top of range.
+  // ---------------------------------------------------------------------------
+  function automatic logic signed [17:0] rnd_s18(input logic signed [31:0] a);
+    logic signed [17:0] t;
+    begin
+      t = $signed(a[31:14]);
+      rnd_s18 = (a[13] && t != 18'sh1FFFF) ? t + 18'sh00001 : t;
+    end
+  endfunction
+
+  function automatic logic signed [24:0] rnd_u25(input logic [31:0] u);
+    logic [23:0] t;
+    begin
+      t = u[31:8];
+      rnd_u25 = $signed({1'b0, ((u[7] && t != 24'hFFFFFF) ? t + 24'h000001 : t)});
+    end
+  endfunction
+
+  wire signed [17:0] x18 = rnd_s18(x_in_r);
+  wire signed [17:0] y18 = rnd_s18(y_in_r);
+  wire signed [17:0] z18 = rnd_s18(z_in_r);
   wire signed [35:0] x18_sq = x18 * x18; // Q2.34, single DSP
   wire signed [35:0] y18_sq = y18 * y18;
   wire signed [35:0] z18_sq = z18 * z18;
@@ -287,8 +314,8 @@ module axis_fixed_norm3#
     logic signed [24:0] q725_25;
     logic signed [42:0] prod_q8_34;
     begin
-      q131_18 = q131[31:14];
-      q725_25 = $signed({1'b0, q725[31:8]});
+      q131_18 = rnd_s18(q131);
+      q725_25 = rnd_u25(q725);
       prod_q8_34 = q131_18 * q725_25;
       mul_q131_q725_to_q856 = 64'(prod_q8_34) <<< 22;
     end

@@ -41,6 +41,33 @@ module axis_ggx_reproject_normalize #
   localparam logic signed [31:0] ONE_Q1 = 32'sh7FFF_FFFF;
   localparam logic signed [31:0] NEG_ONE_Q1 = 32'sh8000_0000;
 
+  // ---------------------------------------------------------------------------
+  // Round-half-up operand narrowing.
+  //
+  // Plain bit-slicing truncates toward -inf, so the quantisation error is not
+  // zero-mean: measured on the full pipeline it showed up as a systematic bias
+  // (mean_signed z = -1.4e-05, ~97% of total error) that Monte Carlo averaging
+  // will NOT remove, unlike random noise. Adding the MSB of the discarded field
+  // makes the error zero-mean. The cost is an increment on the narrowed value,
+  // not a full-width add, which keeps the DSP input path cheap. The equality
+  // guard stops the increment overflowing the narrowed width at top of range.
+  // ---------------------------------------------------------------------------
+  function automatic logic signed [17:0] rnd_s18(input logic signed [31:0] a);
+    logic signed [17:0] t;
+    begin
+      t = $signed(a[31:14]);
+      rnd_s18 = (a[13] && t != 18'sh1FFFF) ? t + 18'sh00001 : t;
+    end
+  endfunction
+
+  function automatic logic signed [24:0] rnd_s25(input logic signed [31:0] a);
+    logic signed [24:0] t;
+    begin
+      t = $signed(a[31:7]);
+      rnd_s25 = (a[6] && t != 25'sh0FFFFFF) ? t + 25'sh0000001 : t;
+    end
+  endfunction
+
   function automatic logic signed [31:0] satq131(input logic signed [63:0] val);
     begin
       if (val > $signed(64'sh0000_0000_7FFF_FFFF)) satq131 = ONE_Q1;
@@ -71,8 +98,8 @@ module axis_ggx_reproject_normalize #
     logic signed [24:0] b_25;       // Q1.24
     logic signed [42:0] prod_q2_41; // Q2.41
     begin
-      a_18       = q131_a[31:14];
-      b_25       = q131_b[31:7];
+      a_18       = rnd_s18(q131_a);
+      b_25       = rnd_s25(q131_b);
       prod_q2_41 = a_18 * b_25;                       // Q1.17 * Q1.24 -> Q2.41
       mul_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21; // Q2.41 -> Q2.62
     end
@@ -89,8 +116,8 @@ module axis_ggx_reproject_normalize #
     logic signed [24:0] b_25;       // Q1.24
     logic signed [42:0] prod_q2_41; // Q2.41
     begin
-      a_18       = q131[31:14];
-      b_25       = q131[31:7];
+      a_18       = rnd_s18(q131);
+      b_25       = rnd_s25(q131);
       prod_q2_41 = a_18 * b_25;                 // Q1.17 * Q1.24 -> Q2.41
       sq_q131_to_q262 = 64'(prod_q2_41) <<< 21; // Q2.41 -> Q2.62
     end

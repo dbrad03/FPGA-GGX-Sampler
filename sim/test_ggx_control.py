@@ -412,7 +412,7 @@ async def test_ggx_control(dut):
     expected_math = []
     burst_sizes = []
     seen = {"n": 0, "out_last": 0}
-    stats = {"max_err": 0.0}
+    stats = {"max_err": 0.0, "signed_sum": np.zeros(3), "abs_sum": np.zeros(3), "n_err": 0}
     parser = {"beats": [], "cmd_count": 0}
     out_state = {"cmd_idx": 0, "sample_idx": 0}
     throughput_cycles_cmd0 = []
@@ -470,6 +470,12 @@ async def test_ggx_control(dut):
         got_h = unpack_vec96_q131_xyz(packed)
         err = float(np.max(np.abs(got_h - exp_h)))
         stats["max_err"] = max(stats["max_err"], err)
+        # Signed residual per component. Truncation (bit-slicing) biases toward
+        # -inf, which max|err| cannot see; a non-zero mean here is systematic
+        # error that Monte Carlo averaging will NOT remove.
+        stats["signed_sum"] += (got_h - exp_h)
+        stats["abs_sum"] += np.abs(got_h - exp_h)
+        stats["n_err"] += 1
 
         exp_last = 1 if out_state["sample_idx"] == (burst_sizes[out_state["cmd_idx"]] - 1) else 0
 
@@ -567,6 +573,12 @@ async def test_ggx_control(dut):
 
     dut._log.info(
         f"axis_ggx_control stats: outputs={seen['n']} max|component_err|={stats['max_err']:.6f} tol={TOL:.6f}"
+        f" | mean_signed=({stats['signed_sum'][0]/max(stats['n_err'],1):+.3e},"
+        f"{stats['signed_sum'][1]/max(stats['n_err'],1):+.3e},"
+        f"{stats['signed_sum'][2]/max(stats['n_err'],1):+.3e})"
+        f" mean_abs=({stats['abs_sum'][0]/max(stats['n_err'],1):.3e},"
+        f"{stats['abs_sum'][1]/max(stats['n_err'],1):.3e},"
+        f"{stats['abs_sum'][2]/max(stats['n_err'],1):.3e})"
     )
 
 
