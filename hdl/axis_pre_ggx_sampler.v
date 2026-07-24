@@ -50,24 +50,24 @@ module axis_pre_ggx_sampler #(
     );
 
     // -------------------------------------------------------------------------
-    // 2. Shared Delay Compensation (8 Cycles)
-    // hash pipeline = 10 stages, sobol pipeline = 2 stages => delay = 10-2 = 8
+    // 2. Shared Delay Compensation (16 Cycles)
+    // hash pipeline = 18 stages, sobol pipeline = 2 stages => delay = 18-2 = 16
     // -------------------------------------------------------------------------
-    reg [31:0] delay_index [0:7];
-    reg [7:0]  delay_valid;
-    reg [7:0]  delay_last;
+    reg [31:0] delay_index [0:15];
+    reg [15:0] delay_valid;
+    reg [15:0] delay_last;
     integer i;
 
     always @(posedge s00_axis_aclk) begin
         if (!s00_axis_aresetn) begin
-            delay_valid <= 8'b0;
-            delay_last  <= 8'b0;
-            for (i=0; i<8; i=i+1) delay_index[i] <= 32'b0;
+            delay_valid <= 16'b0;
+            delay_last  <= 16'b0;
+            for (i=0; i<16; i=i+1) delay_index[i] <= 32'b0;
         end else if (samp_tready) begin
             delay_index[0] <= {16'b0, samp_tdata[47:32]};
             delay_valid[0] <= samp_tvalid;
             delay_last[0]  <= samp_tlast;
-            for(i=0; i<7; i=i+1) begin
+            for(i=0; i<15; i=i+1) begin
                 delay_index[i+1] <= delay_index[i];
                 delay_valid[i+1] <= delay_valid[i];
                 delay_last[i+1]  <= delay_last[i];
@@ -76,9 +76,9 @@ module axis_pre_ggx_sampler #(
     end
 
     wire [63:0] hash_in_data  = samp_tdata;
-    wire [63:0] sobol_in_data = {32'b0, delay_index[7]};
-    wire sobol_in_valid = delay_valid[7];
-    wire sobol_in_last  = delay_last[7];
+    wire [63:0] sobol_in_data = {32'b0, delay_index[15]};
+    wire sobol_in_valid = delay_valid[15];
+    wire sobol_in_last  = delay_last[15];
 
     // -------------------------------------------------------------------------
     // 3. Parallel Paths

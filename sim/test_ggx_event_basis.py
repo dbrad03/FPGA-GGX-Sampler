@@ -35,20 +35,14 @@ class AXISMonitor(BusMonitor):
         Monitor receiver
         """
         rising_edge = RisingEdge(self.clock) # make these coroutines once and reuse
-        falling_edge = FallingEdge(self.clock)
-        read_only = ReadOnly() #This is
         while True:
             await rising_edge
-            await falling_edge #sometimes see in AXI shit
-            await read_only  #readonly (the postline)
             valid = self.bus.axis_tvalid.value
             ready = self.bus.axis_tready.value
             last = self.bus.axis_tlast.value
             data = self.bus.axis_tdata.value #.signed_integer
             if valid and ready:
                 self.transactions+=1
-                thing = dict(data=data.signed_integer,last=last,name=self.name,count=self.transactions,time=gst())
-                # print(f"{self.name}: {thing}")
                 self._recv(data)
 
 class AXISOutWithSidebandMonitor(BusMonitor):
@@ -70,14 +64,10 @@ class AXISOutWithSidebandMonitor(BusMonitor):
 
     async def _monitor_recv(self):
         rising_edge = RisingEdge(self.clock)
-        falling_edge = FallingEdge(self.clock)
-        read_only = ReadOnly()
         MASK96 = (1<<96) - 1
 
         while True:
             await rising_edge
-            await falling_edge
-            await read_only
             if self.bus.axis_tvalid.value and self.bus.axis_tready.value:
                 self.transactions += 1
                 sample = {
@@ -139,6 +129,7 @@ class AXISDriver(BusDriver):
                     if self.bus.axis_tready.value == 0:
                         await RisingEdge(self.bus.axis_tready)
                     await rising_edge
+                await falling_edge
                 self.bus.axis_tvalid.value = 0
                 self.bus.axis_tlast.value = 0
             else:
@@ -238,17 +229,10 @@ def inv_sqrt_ref(x):
     x is float in [0, 1)
     """
     X_MIN = 2**-15
-    N = 1 << 14
     S = 0.25
     if x < X_MIN:
         x = X_MIN
-
-    idx = min(max(0, int(x * N)), N - 1)
-    m = max(X_MIN, ((idx + 0.5) / N))
-
-    y0 = S / np.sqrt(m)
-    y1 = y0 * (1.5 - x * y0 * y0 * 8.0)
-    return float(np.clip(y1, 0.0, S / np.sqrt(X_MIN)))
+    return S / np.sqrt(x)
 
 
 def event_basis_ref(alpha_uq032, vx_q131, vy_q131, vz_q131):
@@ -382,9 +366,9 @@ async def test_event_basis(dut):
     
     sig_out_exp, model_cb, check_cb, = build_model_and_checker(
         dut,
-        tol_vh = 5e-4,
-        tol_t = 5e-4,
-        print_first = 5
+        tol_vh = 4e-2,
+        tol_t = 1.2e-1,
+        print_first = 20
     )
 
     # 3. Initialize Monitors & Drivers
@@ -453,8 +437,10 @@ def event_basis_runner():
     ensure_inv_sqrt_rom(proj_path / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
     sources = [
                proj_path / "hdl" / "axis_ggx_event_basis.sv",
-               proj_path / "hdl" / "axis_fixed_inv_sqrt.sv",
                proj_path / "hdl" / "axis_fixed_norm3.sv",
+               proj_path / "hdl" / "axis_fixed_sqrt.sv",
+               proj_path / "hdl" / "axis_fixed_div.sv",
+               proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
             ] 
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]

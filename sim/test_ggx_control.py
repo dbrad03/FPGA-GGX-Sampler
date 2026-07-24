@@ -32,12 +32,8 @@ class AXISMonitor(BusMonitor):
 
     async def _monitor_recv(self):
         rising_edge = RisingEdge(self.clock)
-        falling_edge = FallingEdge(self.clock)
-        read_only = ReadOnly()
         while True:
             await rising_edge
-            await falling_edge
-            await read_only
             if self.bus.axis_tvalid.value and self.bus.axis_tready.value:
                 self.transactions += 1
                 self._recv(
@@ -187,15 +183,10 @@ def unpack_vec96_q131_xyz(packed96):
 
 def inv_sqrt_ref(x):
     x_min = 2**-15
-    n = 1 << 14
     s = 0.25
     if x < x_min:
         x = x_min
-    idx = min(max(0, int(x * n)), n - 1)
-    m = max(x_min, ((idx + 0.5) / n))
-    y0 = s / np.sqrt(m)
-    y1 = y0 * (1.5 - x * y0 * y0 * 8.0)
-    return float(np.clip(y1, 0.0, s / np.sqrt(x_min)))
+    return s / np.sqrt(x)
 
 
 def norm3_ref_like_rtl(v):
@@ -453,12 +444,8 @@ async def test_ggx_control(dut):
 
     async def reproj_input_model():
         rising_edge = RisingEdge(dut.s00_axis_aclk)
-        falling_edge = FallingEdge(dut.s00_axis_aclk)
-        read_only = ReadOnly()
         while True:
             await rising_edge
-            await falling_edge
-            await read_only
             if dut.reproj_in_valid.value and dut.reproj_in_ready.value:
                 packed = int(dut.reproj_in_data.value) & ((1 << 352) - 1)
                 t1 = q131_to_float(packed & 0xFFFF_FFFF)
@@ -552,7 +539,7 @@ async def test_ggx_control(dut):
         if cidx != len(cmds) - 1:
             ind.append({"type": "pause", "duration": int(rng.integers(1, 6))})
 
-    outd.append({"type": "ready_high", "duration": 520})
+    outd.append({"type": "ready_high", "duration": 800})
     outd.append({"type": "random_ready", "duration": 2200, "ready_prob": 0.42, "seed": 13})
     outd.append({"type": "pause", "duration": 150})
     outd.append({"type": "random_ready", "duration": 2200, "ready_prob": 0.35, "seed": 57})
@@ -574,6 +561,7 @@ async def test_ggx_control(dut):
         f"first command output count mismatch: saw {len(throughput_cycles_cmd0)} expected {burst_sizes[0]}"
     )
     cmd0_gaps = [b - a for a, b in zip(throughput_cycles_cmd0, throughput_cycles_cmd0[1:])]
+    print(f"DEBUG_GAPS: cmd0_gaps={cmd0_gaps}")
     bubble_idx = [i for i, g in enumerate(cmd0_gaps, start=1) if g != 1]
     assert not bubble_idx, f"first-command throughput bubbles at output indices {bubble_idx[:8]}"
 
@@ -592,14 +580,17 @@ def ggx_control_runner():
 
     sources = [
         proj_path / "hdl" / "axis_ggx_control.sv",
+        proj_path / "hdl" / "axis_skid_buffer.sv",
+        proj_path / "hdl" / "axis_fifo_2deep.sv",
         proj_path / "hdl" / "axis_ggx_event_basis.sv",
         proj_path / "hdl" / "axis_pre_ggx_sampler.v",
         proj_path / "hdl" / "axis_top_lvl_sampler.sv",
         proj_path / "hdl" / "axis_ggx_projected_area.sv",
         proj_path / "hdl" / "axis_ggx_reproject_normalize.sv",
         proj_path / "hdl" / "axis_fixed_norm3.sv",
-        proj_path / "hdl" / "axis_fixed_inv_sqrt.sv",
         proj_path / "hdl" / "axis_fixed_sqrt.sv",
+        proj_path / "hdl" / "axis_fixed_div.sv",
+        proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
         proj_path / "hdl" / "axis_sobol2d_stateless.sv",
         proj_path / "hdl" / "axis_nested_uniform_scramble.sv",
         proj_path / "hdl" / "axis_hash_combine_2d.sv",

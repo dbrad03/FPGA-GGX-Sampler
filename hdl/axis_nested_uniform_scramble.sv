@@ -1,7 +1,6 @@
 `timescale 1ns / 1ps
 `default_nettype none
 
-(* use_dsp = "no" *)
 module axis_nested_uniform_scramble #
 	(
 		parameter integer C_S00_AXIS_TDATA_WIDTH	= 64,
@@ -47,17 +46,28 @@ module axis_nested_uniform_scramble #
     s00_axis_tready = !stall;
   end
 
-  logic [DATA_WIDTH-1:0] data_pipeline [0:6];
-  logic [6:0]            valid_pipeline, last_pipeline;
-  logic [SEED_WIDTH-1:0] seed_pipeline [0:6];
+  logic [DATA_WIDTH-1:0] data_pipeline [0:10];
+  logic [10:0]           valid_pipeline, last_pipeline;
+  logic [SEED_WIDTH-1:0] seed_pipeline [0:10];
+
+  logic [DATA_WIDTH-1:0] data_pipeline_d [1:4];
+  logic [DATA_WIDTH-1:0] lk_mul_1, lk_mul_2, lk_mul_3, lk_mul_4;
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
-      for (integer i = 0; i < 7; i = i + 1) begin
+      for (integer i = 0; i <= 10; i = i + 1) begin
         last_pipeline[i]  <= 1'b0;
         valid_pipeline[i] <= 1'b0;
         data_pipeline[i]  <= '0;
+        seed_pipeline[i]  <= '0;
       end
+      for (integer i = 1; i <= 4; i = i + 1) begin
+        data_pipeline_d[i] <= '0;
+      end
+      lk_mul_1 <= '0;
+      lk_mul_2 <= '0;
+      lk_mul_3 <= '0;
+      lk_mul_4 <= '0;
     end else begin
       if (advance) begin
         last_pipeline[0]  <= s00_axis_tlast;
@@ -65,28 +75,59 @@ module axis_nested_uniform_scramble #
         seed_pipeline[0]  <= s00_axis_tdata[63:32];
         data_pipeline[0]  <= reverse_bits(s00_axis_tdata[31:0]);
 
-        for (integer i = 0; i < 6; i = i + 1) begin
+        for (integer i = 0; i < 10; i = i + 1) begin
           last_pipeline[i+1]  <= last_pipeline[i];
           valid_pipeline[i+1] <= valid_pipeline[i];
           seed_pipeline[i+1]  <= seed_pipeline[i];
         end
         
+        // Cycle 1
         data_pipeline[1]  <= data_pipeline[0] + seed_pipeline[0];
-        data_pipeline[2]  <= data_pipeline[1] ^ (data_pipeline[1] * LK_CONST_1);
-        data_pipeline[3]  <= data_pipeline[2] ^ (data_pipeline[2] * LK_CONST_2);
-        data_pipeline[4]  <= data_pipeline[3] ^ (data_pipeline[3] * LK_CONST_3);
-        data_pipeline[5]  <= data_pipeline[4] ^ (data_pipeline[4] * LK_CONST_4);
-        data_pipeline[6]  <= reverse_bits(data_pipeline[5]);
+
+        // Cycle 2
+        lk_mul_1           <= data_pipeline[1] * LK_CONST_1;
+        data_pipeline_d[1] <= data_pipeline[1];
+
+        // Cycle 3
+        data_pipeline[2]   <= data_pipeline_d[1] ^ lk_mul_1;
+
+        // Cycle 4
+        lk_mul_2           <= data_pipeline[2] * LK_CONST_2;
+        data_pipeline_d[2] <= data_pipeline[2];
+
+        // Cycle 5
+        data_pipeline[3]   <= data_pipeline_d[2] ^ lk_mul_2;
+
+        // Cycle 6
+        lk_mul_3           <= data_pipeline[3] * LK_CONST_3;
+        data_pipeline_d[3] <= data_pipeline[3];
+
+        // Cycle 7
+        data_pipeline[4]   <= data_pipeline_d[3] ^ lk_mul_3;
+
+        // Cycle 8
+        lk_mul_4           <= data_pipeline[4] * LK_CONST_4;
+        data_pipeline_d[4] <= data_pipeline[4];
+
+        // Cycle 9
+        data_pipeline[5]   <= data_pipeline_d[4] ^ lk_mul_4;
+
+        // Cycle 10
+        data_pipeline[6]   <= reverse_bits(data_pipeline[5]);
+
+        data_pipeline[7]   <= data_pipeline[6];
+        data_pipeline[8]   <= data_pipeline[7];
+        data_pipeline[9]   <= data_pipeline[8];
+        data_pipeline[10]  <= data_pipeline[9];
       end
     end
   end
 
   always_comb begin
-    m00_axis_tdata  = {seed_pipeline[6], data_pipeline[6]};
-    m00_axis_tvalid = valid_pipeline[6];
-    m00_axis_tlast  = last_pipeline[6];
+    m00_axis_tdata  = {seed_pipeline[10], data_pipeline[10]};
+    m00_axis_tvalid = valid_pipeline[10];
+    m00_axis_tlast  = last_pipeline[10];
     m00_axis_tstrb  = '1;
-    
   end
 
 endmodule

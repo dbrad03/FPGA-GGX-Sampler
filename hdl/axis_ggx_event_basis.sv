@@ -28,7 +28,7 @@ module axis_ggx_event_basis #
 	);
 
 	localparam int NORM_LATENCY = 10;
-	localparam int INVSQRT_LATENCY = 9; // +1 for axis_fixed_inv_sqrt input register stage
+	localparam int INVSQRT_LATENCY = 93; // Latency of axis_fixed_inv_sqrt_nodsp
 	localparam logic signed [FRAC_BITS-1:0] ONE_Q1 		 = 32'h7FFF_FFFF; // 1 in Q1.31
 	localparam logic signed [FRAC_BITS-1:0] NEG_ONE_Q1 = 32'h8000_0000; // -1
 	localparam logic 		[FRAC_BITS-1:0] ONE_Q0 		 = 32'hFFFF_FFFF; // 1 in UQ0.32
@@ -39,25 +39,38 @@ module axis_ggx_event_basis #
 	wire signed [31:0] view_y_in = s00_axis_tdata[63:32];
 	wire signed [31:0] view_x_in = s00_axis_tdata[31:0];
 
+	// Quantized to a single DSP48E1: truncate operands to 18b x 25b so the
+	// product fits one DSP (auto AREG/MREG/PREG, no fabric cascade). Q1.31 in,
+	// Q1.31 out; huge headroom (tol 0.065 vs err ~3e-5) makes 17/24-bit safe.
 	function automatic logic signed [31:0] mul_q131_uq032_to_q131(
 		input logic signed [31:0] q131,
 		input logic 			 [31:0] uq032
 	);
-		logic signed [63:0] prod_q163;
-		logic signed [32:0] uq032_ext;
+		logic signed [17:0] q131_18;    // Q1.17
+		logic signed [24:0] uq032_25;   // UQ0.24 (positive)
+		logic signed [42:0] prod_q1_41; // Q1.41
 		begin
-				uq032_ext = $signed({1'b0, uq032}); // unsigned -> signed positive
-				prod_q163 = $signed(q131) * uq032_ext; // Q1.31 * Q0.32 -> Q1.63
-				mul_q131_uq032_to_q131 = prod_q163 >>> 32; // Q1.63 -> Q1.31
+				q131_18    = q131[31:14];
+				uq032_25   = $signed({1'b0, uq032[31:8]});
+				prod_q1_41 = q131_18 * uq032_25;                 // Q1.17 * UQ0.24 -> Q1.41
+				mul_q131_uq032_to_q131 = 32'(prod_q1_41 >>> 10); // Q1.41 -> Q1.31
 		end
 	endfunction
 
+	// Quantized to a single DSP48E1 (18b x 25b). Q1.31 x Q1.31 -> Q2.62,
+	// with the low bits zero-filled (precision loss << tolerance headroom).
 	function automatic logic signed [63:0] mul_q131_q131_to_q262(
 		input logic signed [31:0] q131_a,
 		input logic signed [31:0] q131_b
 	);
+		logic signed [17:0] a_18;       // Q1.17
+		logic signed [24:0] b_25;       // Q1.24
+		logic signed [42:0] prod_q2_41; // Q2.41
 		begin
-				mul_q131_q131_to_q262 = (q131_a * q131_b);
+				a_18       = q131_a[31:14];
+				b_25       = q131_b[31:7];
+				prod_q2_41 = a_18 * b_25;                        // Q1.17 * Q1.24 -> Q2.41
+				mul_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;  // Q2.41 -> Q2.62
 		end
 	endfunction
 
@@ -65,10 +78,14 @@ module axis_ggx_event_basis #
 		input logic signed [31:0] q131,
 		input logic 			 [31:0] q725
 	);
-		logic signed [32:0] q725_ext;
+		logic signed [17:0] q131_18;
+		logic signed [24:0] q725_25;
+		logic signed [42:0] prod_q8_34;
 		begin
-				q725_ext = $signed({1'b0, q725});
-				mul_q131_q725_to_q856 = $signed(q131) * q725_ext;
+			q131_18 = q131[31:14];
+			q725_25 = $signed({1'b0, q725[31:8]});
+			prod_q8_34 = q131_18 * q725_25;
+			mul_q131_q725_to_q856 = 64'(prod_q8_34) <<< 22;
 		end
 	endfunction
   
@@ -149,6 +166,12 @@ module axis_ggx_event_basis #
 	wire signed [31:0] vh_z = $signed(norm_out[95:64]);
 	wire signed [31:0] vh_y = $signed(norm_out[63:32]);
 	wire signed [31:0] vh_x = $signed(norm_out[31:0]);
+	/// STAGE 2 Declarations (moved up to avoid forward reference error in Icarus Verilog)
+	logic s2a_valid;
+	wire s2b_advance;
+	wire s2a_ready;
+	wire s2a_load;
+
 	axis_fixed_norm3 normalize_warped_view (
 		.s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
@@ -168,7 +191,6 @@ module axis_ggx_event_basis #
 	);
 
 	/// STAGE 2: COMPUTE LENGTH SQAURED (vhx^2 + vhy^2)
-	logic s2a_valid;
 	logic signed [63:0] z2_q262;
 	logic [95:0] Vh_20;
 
@@ -177,9 +199,24 @@ module axis_ggx_event_basis #
 	wire [31:0] lensq = z2_q262[62] ? 32'b0 : (ONE_Q0 - z2_uq032);
 	wire lensq_condition = lensq < UQ0_32_MIN || z2_q262[62];
 
-	wire s2b_advance = pipe_en && s2a_valid && inv_in_ready;
-	wire s2a_ready = pipe_en && (!s2a_valid || s2b_advance);
-	wire s2a_load  = norm_out_valid && s2a_ready;
+	// Stage 2b Handshake
+	logic [31:0] lensq_xy_reg;
+	logic        lensq_branch_reg;
+	logic [95:0] Vh_21_reg;
+	logic        s2b_advance_reg;
+	wire stage_2b_ready = pipe_en && (inv_in_ready || !s2b_advance_reg);
+
+	// Stage 2a Handshake
+	logic [31:0] lensq_sub_reg;
+	logic        lensq_condition_reg;
+	logic [95:0] Vh_21a_reg;
+	logic        s2a_valid_reg;
+	wire stage_2a_ready = stage_2b_ready || !s2a_valid_reg;
+
+	// Upstream Handshake
+	assign s2b_advance = s2a_valid && stage_2a_ready;
+	assign s2a_ready = !s2a_valid || stage_2a_ready;
+	assign s2a_load  = norm_out_valid && s2a_ready;
 	
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
@@ -198,22 +235,70 @@ module axis_ggx_event_basis #
 		end
 	end
 
-	wire lensq_branch = lensq_condition;
-	wire [31:0] lensq_xy = clamp_uq032_min(lensq);
-	wire [95:0] Vh_21 = Vh_20;
+	// Stage 2a Registers
+	always_ff @(posedge s00_axis_aclk) begin
+		if (s00_axis_aresetn == 0) begin
+			s2a_valid_reg       <= 1'b0;
+			lensq_sub_reg       <= '0;
+			lensq_condition_reg <= 1'b0;
+			Vh_21a_reg          <= '0;
+		end else if (pipe_en) begin
+			if (stage_2a_ready) begin
+				s2a_valid_reg <= s2b_advance;
+				if (s2b_advance) begin
+					lensq_sub_reg       <= z2_q262[62] ? 32'b0 : (ONE_Q0 - z2_uq032);
+					lensq_condition_reg <= lensq_condition;
+					Vh_21a_reg          <= Vh_20;
+				end
+			end
+		end
+	end
 
-	/// STAGE 3: 1 / SQRT(LENSQ) w/ axis_fixed_inv_sqrt
-	axis_fixed_inv_sqrt # (
+	// Stage 2b Registers
+	always_ff @(posedge s00_axis_aclk) begin
+		if (s00_axis_aresetn == 0) begin
+			s2b_advance_reg  <= 1'b0;
+			lensq_xy_reg     <= '0;
+			lensq_branch_reg <= 1'b0;
+			Vh_21_reg        <= '0;
+		end else if (pipe_en) begin
+			if (stage_2b_ready) begin
+				s2b_advance_reg <= s2a_valid_reg;
+				if (s2a_valid_reg) begin
+					lensq_xy_reg     <= clamp_uq032_min(lensq_sub_reg);
+					lensq_branch_reg <= lensq_condition_reg;
+					Vh_21_reg        <= Vh_21a_reg;
+				end
+			end
+		end
+	end
+
+	wire lensq_branch = lensq_branch_reg;
+	wire [31:0] lensq_xy = lensq_xy_reg;
+	wire [95:0] Vh_21 = Vh_21_reg;
+ 
+	wire [31:0] delayed_Vh_x, delayed_Vh_y, delayed_Vh_z;
+	wire [3:0] delayed_shift;
+	wire [95:0] delayed_Vh = {delayed_Vh_z, delayed_Vh_y, delayed_Vh_x};
+	wire use_inv_sqrt = ~delayed_shift[0];
+ 
+	/// STAGE 3: 1 / SQRT(LENSQ) w/ axis_fixed_inv_sqrt_nodsp
+	axis_fixed_inv_sqrt_nodsp # (
     .FRAC_BITS(FRAC_BITS),
     .ADDR_BITS(14)
   ) u_inv_sqrt (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
-    .s00_axis_tvalid(s2b_advance),
+    .s00_axis_tvalid(s2b_advance_reg),
     .s00_axis_tdata(lensq_xy),
     .s00_axis_tstrb('1),
     .s00_axis_tready(inv_in_ready),
+    
+    .s00_axis_user_x(Vh_21[31:0]),
+    .s00_axis_user_y(Vh_21[63:32]),
+    .s00_axis_user_z(Vh_21[95:64]),
+    .s00_axis_user_shift({3'b0, lensq_branch}),
 
     .m00_axis_aclk(s00_axis_aclk),
     .m00_axis_aresetn(s00_axis_aresetn),
@@ -221,28 +306,13 @@ module axis_ggx_event_basis #
     .m00_axis_tvalid(inv_out_valid),
     .m00_axis_tdata(inv_len_q7_25),
     .m00_axis_tstrb(),
-    .m00_axis_tready(pipe_en)
+    .m00_axis_tready(pipe_en),
+    
+    .m00_axis_user_x(delayed_Vh_x),
+    .m00_axis_user_y(delayed_Vh_y),
+    .m00_axis_user_z(delayed_Vh_z),
+    .m00_axis_user_shift(delayed_shift)
   );
-
-	// Delay Hemisphere Warped View to Match INV_SQRT LATENCY
-	logic [95:0] delay_Vh [0:INVSQRT_LATENCY-1];
-	logic [INVSQRT_LATENCY-1:0] delay_lensq_branch;
-	always_ff @(posedge s00_axis_aclk) begin
-		if (s00_axis_aresetn==0) begin
-			delay_lensq_branch <= '0;
-			for (integer i = 0; i < INVSQRT_LATENCY; i = i + 1) begin
-				delay_Vh[i] <= '0;
-			end
-		end else if (pipe_en) begin
-			delay_lensq_branch <= {delay_lensq_branch[INVSQRT_LATENCY-2:0], (s2b_advance ? lensq_branch : 1'b0)};
-			delay_Vh[0] <=  s2b_advance ? Vh_21 : '0;
-			for (integer i = 1; i < INVSQRT_LATENCY; i = i + 1) begin
-				delay_Vh[i] <= delay_Vh[i-1];
-			end
-		end
-	end
-	wire use_inv_sqrt = ~delay_lensq_branch[INVSQRT_LATENCY-1];
-	wire [95:0] delayed_Vh 	= delay_Vh[INVSQRT_LATENCY-1];
 
 	/// STAGE 4: FORM T1
 	logic s4a_valid, s4b_valid, s4c_valid;

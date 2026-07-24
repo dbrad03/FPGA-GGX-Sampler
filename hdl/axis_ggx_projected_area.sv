@@ -34,8 +34,8 @@ module axis_ggx_projected_area #
   localparam int TRIG_LATENCY = 2;
   localparam int SQRT_DELAY   = SQRT_LATENCY + 1;
   localparam int TRIG_DELAY   = TRIG_LATENCY + 1;
-  localparam int SQRT_META_DEPTH = (1 << $clog2(SQRT_DELAY + 2));
-  localparam int TRIG_META_DEPTH = (1 << $clog2(TRIG_DELAY + 2));
+  localparam int SQRT_META_DEPTH = 256;
+  localparam int TRIG_META_DEPTH = 256;
   localparam int SQRT_META_AW = $clog2(SQRT_META_DEPTH);
   localparam int TRIG_META_AW = $clog2(TRIG_META_DEPTH);
 
@@ -59,12 +59,14 @@ module axis_ggx_projected_area #
     input logic signed [31:0] q131,
     input logic [31:0] uq032
   );
-    logic signed [32:0] uq032_ext;
-    logic signed [63:0] prod_q163;
+    logic signed [23:0] q131_24;
+    logic signed [17:0] uq032_18;
+    logic signed [41:0] prod;
     begin
-      uq032_ext = $signed({1'b0, uq032});
-      prod_q163 = $signed(q131) * uq032_ext;     // Q1.31 * Q0.32 -> Q1.63
-      mul_q131_uq032_to_q131 = prod_q163 >>> 32; // Q1.63 -> Q1.31
+      q131_24 = q131[31:8];
+      uq032_18 = $signed({1'b0, uq032[31:15]});
+      prod = q131_24 * uq032_18;     // Q1.23 * Q0.17 -> Q1.40
+      mul_q131_uq032_to_q131 = prod >>> 9; // Q1.40 -> Q1.31
     end
   endfunction
 
@@ -72,10 +74,14 @@ module axis_ggx_projected_area #
     input logic [31:0] uq032_a,
     input logic [31:0] uq032_b
   );
-    logic [63:0] prod_uq064;
+    logic signed [24:0] a_25;
+    logic signed [17:0] b_18;
+    logic signed [42:0] prod;
     begin
-      prod_uq064 = uq032_a * uq032_b;          // Q0.64
-      mul_uq032_uq032_to_uq032 = prod_uq064[63:32];
+      a_25 = $signed({1'b0, uq032_a[31:9]}); // 24-bit unsigned -> 25-bit signed
+      b_18 = $signed({1'b0, uq032_b[31:15]}); // 17-bit unsigned -> 18-bit signed
+      prod = a_25 * b_18;                    // Q0.23 * Q0.17 -> Q0.40
+      mul_uq032_uq032_to_uq032 = prod >>> 8; // Q0.40 -> Q0.32
     end
   endfunction
 
@@ -83,10 +89,14 @@ module axis_ggx_projected_area #
     input logic signed [31:0] q131_a,
     input logic signed [31:0] q131_b
   );
-    logic signed [63:0] prod_q262;
+    logic signed [23:0] a_24;
+    logic signed [17:0] b_18;
+    logic signed [41:0] prod;
     begin
-      prod_q262 = $signed(q131_a) * $signed(q131_b);
-      mul_q131_q131_to_q262 = prod_q262;
+      a_24 = q131_a[31:8];
+      b_18 = q131_b[31:14];
+      prod = a_24 * b_18; // Q1.23 * Q1.17 -> Q2.40
+      mul_q131_q131_to_q262 = 64'(prod) <<< 22; // Q2.40 -> Q2.62
     end
   endfunction
 
@@ -193,11 +203,13 @@ module axis_ggx_projected_area #
   // Stage B1: Register trig outputs before the DSP multiplies.
   logic s1b_valid, s1b_last;
   logic [31:0] s1b_r_uq032;
-  logic signed [31:0] s1b_trig_sin_q131, s1b_trig_cos_q131, s1b_vhz_q131;
+  logic signed [31:0] s1b_trig_sin_q131, s1b_trig_cos_q131;
+  logic signed [31:0] s1b_vhz_q131;
 
   // Stage C0: Register t1/t2 partials after the DSP multiplies.
   logic s2_valid, s2_last;
-  logic signed [31:0] s2_t1_q131, s2_t2_q131, s2_vhz_q131;
+  logic signed [31:0] s2_t1_q131, s2_t2_q131;
+  logic signed [31:0] s2_vhz_q131;
 
   // Stage C1: Register t1^2 before the second sqrt.
   logic c0_valid, c0_last;

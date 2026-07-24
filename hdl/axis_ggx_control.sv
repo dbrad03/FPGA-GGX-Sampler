@@ -135,7 +135,7 @@ module axis_ggx_control #
   wire proj_out_last;
   wire signed [63:0] proj_out_t2_t1;
 
-  wire reproj_in_valid = proj_out_valid;
+  wire reproj_in_valid;
   wire reproj_in_ready;
   wire reproj_out_valid;
   wire reproj_out_last;
@@ -149,6 +149,27 @@ module axis_ggx_control #
 
   assign sampler_out_ready = basis_valid_reg && (state == ST_RUN_BURST) && proj_in_ready;
 
+  wire proj_to_skid_ready;
+  wire [63:0] skid_proj_out_t2_t1;
+  wire skid_proj_out_valid;
+  wire skid_proj_out_last;
+  wire skid_to_reproj_ready;
+
+  axis_fifo_2deep #(
+    .DATA_WIDTH(64)
+  ) u_skid_proj (
+    .clk(s00_axis_aclk),
+    .resetn(s00_axis_aresetn),
+    .s_axis_tvalid(proj_out_valid),
+    .s_axis_tready(proj_to_skid_ready),
+    .s_axis_tdata(proj_out_t2_t1),
+    .s_axis_tlast(proj_out_last),
+    .m_axis_tvalid(skid_proj_out_valid),
+    .m_axis_tready(skid_to_reproj_ready),
+    .m_axis_tdata(skid_proj_out_t2_t1),
+    .m_axis_tlast(skid_proj_out_last)
+  );
+
   axis_ggx_projected_area u_projected_area (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
@@ -160,7 +181,7 @@ module axis_ggx_control #
 
     .m00_axis_aclk(s00_axis_aclk),
     .m00_axis_aresetn(s00_axis_aresetn),
-    .m00_axis_tready(reproj_in_ready),
+    .m00_axis_tready(proj_to_skid_ready),
     .m00_axis_tvalid(proj_out_valid),
     .m00_axis_tlast(proj_out_last),
     .m00_axis_tdata(proj_out_t2_t1),
@@ -176,17 +197,17 @@ module axis_ggx_control #
     basis_vh_reg,
     basis_t2_reg,
     basis_t1_reg,
-    proj_out_t2_t1
+    skid_proj_out_t2_t1
   };
 
   axis_ggx_reproject_normalize u_reproject_normalize (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
-    .s00_axis_tlast(proj_out_last),
-    .s00_axis_tvalid(reproj_in_valid),
+    .s00_axis_tlast(skid_proj_out_last),
+    .s00_axis_tvalid(skid_proj_out_valid),
     .s00_axis_tdata(reproj_in_data),
     .s00_axis_tstrb('1),
-    .s00_axis_tready(reproj_in_ready),
+    .s00_axis_tready(skid_to_reproj_ready),
 
     .m00_axis_aclk(s00_axis_aclk),
     .m00_axis_aresetn(s00_axis_aresetn),
@@ -196,6 +217,8 @@ module axis_ggx_control #
     .m00_axis_tdata(reproj_out_h),
     .m00_axis_tstrb()
   );
+  assign reproj_in_valid = skid_proj_out_valid;
+  assign reproj_in_ready = skid_to_reproj_ready;
 
   // ---------------------------------------------------------------------------
   // Control FSM

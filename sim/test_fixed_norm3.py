@@ -118,7 +118,9 @@ def norm_runner():
     ensure_rom_exists(proj_path / "sim" / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
     sources = [
                proj_path / "hdl" / "axis_fixed_norm3.sv",
-               proj_path / "hdl" / "axis_fixed_inv_sqrt.sv",
+               proj_path / "hdl" / "axis_fixed_sqrt.sv",
+               proj_path / "hdl" / "axis_fixed_div.sv",
+               proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
             ]
 
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]

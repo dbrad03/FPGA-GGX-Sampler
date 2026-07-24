@@ -32,12 +32,8 @@ class AXISMonitor(BusMonitor):
 
     async def _monitor_recv(self):
         rising_edge = RisingEdge(self.clock)
-        falling_edge = FallingEdge(self.clock)
-        read_only = ReadOnly()
         while True:
             await rising_edge
-            await falling_edge
-            await read_only
             if self.bus.axis_tvalid.value and self.bus.axis_tready.value:
                 self.transactions += 1
                 self._recv(
@@ -92,7 +88,6 @@ class AXISDriver(BusDriver):
                     if self.bus.axis_tready.value == 1:
                         break
                     await rising_edge
-                    await falling_edge
                 await rising_edge
                 self.bus.axis_tvalid.value = 0
                 self.bus.axis_tlast.value = 0
@@ -194,15 +189,10 @@ def normalize3(v):
 
 def inv_sqrt_ref(x):
     x_min = 2**-15
-    n = 1 << 14
     s = 0.25
     if x < x_min:
         x = x_min
-    idx = min(max(0, int(x * n)), n - 1)
-    m = max(x_min, ((idx + 0.5) / n))
-    y0 = s / np.sqrt(m)
-    y1 = y0 * (1.5 - x * y0 * y0 * 8.0)
-    return float(np.clip(y1, 0.0, s / np.sqrt(x_min)))
+    return s / np.sqrt(x)
 
 
 def norm3_ref_like_rtl(v):
@@ -468,8 +458,9 @@ def reproject_normalize_runner():
     sources = [
         proj_path / "hdl" / "axis_ggx_reproject_normalize.sv",
         proj_path / "hdl" / "axis_fixed_sqrt.sv",
+        proj_path / "hdl" / "axis_fixed_div.sv",
+        proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
         proj_path / "hdl" / "axis_fixed_norm3.sv",
-        proj_path / "hdl" / "axis_fixed_inv_sqrt.sv",
     ]
 
     runner = get_runner(sim)

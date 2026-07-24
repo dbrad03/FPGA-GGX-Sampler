@@ -9,7 +9,10 @@ from math import log
 from pathlib import Path
 from cocotb.clock import Clock
 from cocotb.triggers import Timer, ClockCycles, RisingEdge, FallingEdge, ReadOnly, with_timeout
-from cocotb.runner import get_runner
+try:
+    from cocotb.runner import get_runner
+except ImportError:
+    from cocotb_tools.runner import get_runner
 from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
