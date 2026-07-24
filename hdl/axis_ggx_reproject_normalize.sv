@@ -31,7 +31,10 @@ module axis_ggx_reproject_normalize #
 
   localparam int META0_DEPTH = 128;
   localparam int META0_AW    = $clog2(META0_DEPTH);
-  localparam int META1_DEPTH = 32;
+  // norm3 wraps the ~93-cycle no-DSP inverse-sqrt, so its worst-case in-flight
+  // occupancy far exceeds 32; META1 must be deeper than that latency or the
+  // TLAST-tracking FIFO overflows (spurious TLAST). Sized to 128 with margin.
+  localparam int META1_DEPTH = 128;
   localparam int META1_AW    = $clog2(META1_DEPTH);
 
   localparam logic [31:0] ONE_UQ0_32 = 32'hFFFF_FFFF;
@@ -43,6 +46,16 @@ module axis_ggx_reproject_normalize #
       if (val > $signed(64'sh0000_0000_7FFF_FFFF)) satq131 = ONE_Q1;
       else if (val < $signed(64'shFFFF_FFFF_8000_0000)) satq131 = NEG_ONE_Q1;
       else satq131 = val[31:0];
+    end
+  endfunction
+
+  // Narrow saturation on a 34-bit Q1.31 accumulator (the wide 64-bit satq131 is
+  // unnecessary once the sum is width-reduced to 34 bits).
+  function automatic logic signed [31:0] satq131_34(input logic signed [33:0] val);
+    begin
+      if (val > $signed(34'sh0_7FFF_FFFF)) satq131_34 = ONE_Q1;
+      else if (val < $signed(34'sh3_8000_0000)) satq131_34 = NEG_ONE_Q1;
+      else satq131_34 = val[31:0];
     end
   endfunction
 
@@ -267,12 +280,13 @@ module axis_ggx_reproject_normalize #
   // --------------------------------------------------------------------------
   // Stage B0: Register sqrt-aligned inputs to cut the sqrt->multiply path
   // Stage B1A: Raw Q2.62 reprojection products
-  // Stage B1: Clamp/scale products back to Q1.31
-  // Stage B2: Sum + saturate to form unnormalized H
+  // Stage B1:  Clamp/scale products back to Q1.31
+  // Stage B1B: Partial sum (t1+t2), carry vh forward
+  // Stage B2:  Final sum (+vh) + saturate to form unnormalized H
   // --------------------------------------------------------------------------
   logic b0_valid, b0_last;
-  logic signed [95:0] b0_t1, b0_t2, b0_vh;
-  logic signed [31:0] b0_t1_s, b0_t2_s, b0_t3_s;
+  (* keep = "true" *) logic signed [95:0] b0_t1, b0_t2, b0_vh;
+  (* keep = "true" *) logic signed [31:0] b0_t1_s, b0_t2_s, b0_t3_s;
 
   logic b1a_valid, b1a_last;
   logic signed [63:0] b1a_hx_t1_q262, b1a_hx_t2_q262, b1a_hx_vh_q262;
@@ -280,9 +294,13 @@ module axis_ggx_reproject_normalize #
   logic signed [63:0] b1a_hz_t1_q262, b1a_hz_t2_q262, b1a_hz_vh_q262;
 
   logic b1_valid, b1_last;
-  logic signed [31:0] b1_hx_t1, b1_hx_t2, b1_hx_vh;
-  logic signed [31:0] b1_hy_t1, b1_hy_t2, b1_hy_vh;
-  logic signed [31:0] b1_hz_t1, b1_hz_t2, b1_hz_vh;
+  (* keep = "true" *) logic signed [31:0] b1_hx_t1, b1_hx_t2, b1_hx_vh;
+  (* keep = "true" *) logic signed [31:0] b1_hy_t1, b1_hy_t2, b1_hy_vh;
+  (* keep = "true" *) logic signed [31:0] b1_hz_t1, b1_hz_t2, b1_hz_vh;
+
+  logic b1b_valid, b1b_last;
+  logic signed [32:0] b1b_hx_sum, b1b_hy_sum, b1b_hz_sum;
+  logic signed [31:0] b1b_hx_vh, b1b_hy_vh, b1b_hz_vh;
 
   logic b2_valid, b2_last;
   logic signed [31:0] b2_hx, b2_hy, b2_hz;
@@ -290,8 +308,13 @@ module axis_ggx_reproject_normalize #
   wire norm_in_ready;
   wire b2_to_norm = b2_valid && norm_in_ready;
   wire b2_ready = !b2_valid || b2_to_norm;
-  wire b1_to_b2 = b1_valid && b2_ready;
-  wire b1_ready = !b1_valid || b1_to_b2;
+
+  wire b1b_to_b2 = b1b_valid && b2_ready;
+  wire b1b_ready = !b1b_valid || b1b_to_b2;
+
+  wire b1_to_b1b = b1_valid && b1b_ready;
+  wire b1_ready = !b1_valid || b1_to_b1b;
+
   wire b1a_to_b1 = b1a_valid && b1_ready;
   wire b1a_ready = !b1a_valid || b1a_to_b1;
   wire b0_to_b1a = b0_valid && b1a_ready;
@@ -319,30 +342,18 @@ module axis_ggx_reproject_normalize #
   wire signed [31:0] b1_hz_t2_w = scale_q262_to_q131(b1a_hz_t2_q262);
   wire signed [31:0] b1_hz_vh_w = scale_q262_to_q131(b1a_hz_vh_q262);
 
-  wire signed [63:0] b2_hx_sum_w = $signed({{32{b1_hx_t1[31]}}, b1_hx_t1}) +
-                                   $signed({{32{b1_hx_t2[31]}}, b1_hx_t2}) +
-                                   $signed({{32{b1_hx_vh[31]}}, b1_hx_vh});
-  wire signed [63:0] b2_hy_sum_w = $signed({{32{b1_hy_t1[31]}}, b1_hy_t1}) +
-                                   $signed({{32{b1_hy_t2[31]}}, b1_hy_t2}) +
-                                   $signed({{32{b1_hy_vh[31]}}, b1_hy_vh});
-  wire signed [63:0] b2_hz_sum_w = $signed({{32{b1_hz_t1[31]}}, b1_hz_t1}) +
-                                   $signed({{32{b1_hz_t2[31]}}, b1_hz_t2}) +
-                                   $signed({{32{b1_hz_vh[31]}}, b1_hz_vh});
+  wire signed [33:0] b2_hx_sum_w = $signed({b1b_hx_sum[32], b1b_hx_sum}) + $signed({{2{b1b_hx_vh[31]}}, b1b_hx_vh});
+  wire signed [33:0] b2_hy_sum_w = $signed({b1b_hy_sum[32], b1b_hy_sum}) + $signed({{2{b1b_hy_vh[31]}}, b1b_hy_vh});
+  wire signed [33:0] b2_hz_sum_w = $signed({b1b_hz_sum[32], b1b_hz_sum}) + $signed({{2{b1b_hz_vh[31]}}, b1b_hz_vh});
 
-  wire signed [31:0] b2_hx_w = satq131(b2_hx_sum_w);
-  wire signed [31:0] b2_hy_w = satq131(b2_hy_sum_w);
-  wire signed [31:0] b2_hz_w = satq131(b2_hz_sum_w);
+  wire signed [31:0] b2_hx_w = satq131_34(b2_hx_sum_w);
+  wire signed [31:0] b2_hy_w = satq131_34(b2_hy_sum_w);
+  wire signed [31:0] b2_hz_w = satq131_34(b2_hz_sum_w);
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
       b0_valid <= 1'b0;
       b0_last <= 1'b0;
-      b0_t1 <= '0;
-      b0_t2 <= '0;
-      b0_vh <= '0;
-      b0_t1_s <= '0;
-      b0_t2_s <= '0;
-      b0_t3_s <= '0;
     end else begin
       if (sqrt_out_fire) begin
         b0_valid <= 1'b1;
@@ -363,15 +374,6 @@ module axis_ggx_reproject_normalize #
     if (s00_axis_aresetn==0) begin
       b1a_valid <= 1'b0;
       b1a_last <= 1'b0;
-      b1a_hx_t1_q262 <= '0;
-      b1a_hx_t2_q262 <= '0;
-      b1a_hx_vh_q262 <= '0;
-      b1a_hy_t1_q262 <= '0;
-      b1a_hy_t2_q262 <= '0;
-      b1a_hy_vh_q262 <= '0;
-      b1a_hz_t1_q262 <= '0;
-      b1a_hz_t2_q262 <= '0;
-      b1a_hz_vh_q262 <= '0;
     end else begin
       if (b0_to_b1a) begin
         b1a_valid <= 1'b1;
@@ -395,15 +397,6 @@ module axis_ggx_reproject_normalize #
     if (s00_axis_aresetn==0) begin
       b1_valid <= 1'b0;
       b1_last <= 1'b0;
-      b1_hx_t1 <= '0;
-      b1_hx_t2 <= '0;
-      b1_hx_vh <= '0;
-      b1_hy_t1 <= '0;
-      b1_hy_t2 <= '0;
-      b1_hy_vh <= '0;
-      b1_hz_t1 <= '0;
-      b1_hz_t2 <= '0;
-      b1_hz_vh <= '0;
     end else begin
       if (b1a_to_b1) begin
         b1_valid <= 1'b1;
@@ -417,8 +410,28 @@ module axis_ggx_reproject_normalize #
         b1_hz_t1 <= b1_hz_t1_w;
         b1_hz_t2 <= b1_hz_t2_w;
         b1_hz_vh <= b1_hz_vh_w;
-      end else if (b1_to_b2) begin
+      end else if (b1_to_b1b) begin
         b1_valid <= 1'b0;
+      end
+    end
+  end
+
+  always_ff @(posedge s00_axis_aclk) begin
+    if (s00_axis_aresetn==0) begin
+      b1b_valid  <= 1'b0;
+      b1b_last   <= 1'b0;
+    end else begin
+      if (b1_to_b1b) begin
+        b1b_valid  <= 1'b1;
+        b1b_last   <= b1_last;
+        b1b_hx_sum <= $signed({b1_hx_t1[31], b1_hx_t1}) + $signed({b1_hx_t2[31], b1_hx_t2});
+        b1b_hx_vh  <= b1_hx_vh;
+        b1b_hy_sum <= $signed({b1_hy_t1[31], b1_hy_t1}) + $signed({b1_hy_t2[31], b1_hy_t2});
+        b1b_hy_vh  <= b1_hy_vh;
+        b1b_hz_sum <= $signed({b1_hz_t1[31], b1_hz_t1}) + $signed({b1_hz_t2[31], b1_hz_t2});
+        b1b_hz_vh  <= b1_hz_vh;
+      end else if (b1b_to_b2) begin
+        b1b_valid  <= 1'b0;
       end
     end
   end
@@ -427,13 +440,10 @@ module axis_ggx_reproject_normalize #
     if (s00_axis_aresetn==0) begin
       b2_valid <= 1'b0;
       b2_last <= 1'b0;
-      b2_hx <= '0;
-      b2_hy <= '0;
-      b2_hz <= '0;
     end else begin
-      if (b1_to_b2) begin
+      if (b1b_to_b2) begin
         b2_valid <= 1'b1;
-        b2_last <= b1_last;
+        b2_last <= b1b_last;
         b2_hx <= b2_hx_w;
         b2_hy <= b2_hy_w;
         b2_hz <= b2_hz_w;
