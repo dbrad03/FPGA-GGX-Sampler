@@ -105,6 +105,19 @@ module axis_ggx_reproject_normalize #
     end
   endfunction
 
+  // Operands ALREADY narrowed+rounded upstream (registered), so only a clean
+  // reg -> DSP path remains. Q1.17 x Q1.24 -> Q2.62.
+  function automatic logic signed [63:0] mul_pre_q131_q131_to_q262(
+    input logic signed [17:0] a_18,
+    input logic signed [24:0] b_25
+  );
+    logic signed [42:0] prod_q2_41;
+    begin
+      prod_q2_41 = a_18 * b_25;
+      mul_pre_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;
+    end
+  endfunction
+
   // Quantized square: truncate the operand to 18b and 25b so the product fits
   // ONE DSP48E1 (auto AREG/MREG/PREG, no fabric cascade). Q1.31 -> Q2.62 with
   // the low bits zero-filled. Both truncations keep the operand's sign, so the
@@ -155,6 +168,10 @@ module axis_ggx_reproject_normalize #
   // --------------------------------------------------------------------------
   logic a0_valid, a0_last;
   logic [C_S00_AXIS_TDATA_WIDTH-1:0] a0_data;
+  // t1/t2 pre-narrowed+rounded as A0 captures the input, so the A1A square is a
+  // clean reg -> DSP multiply (round-half-up carry rides the A0 capture path).
+  logic signed [17:0] a0_t1_r18, a0_t2_r18;
+  logic signed [24:0] a0_t1_r25, a0_t2_r25;
   logic a1a_valid, a1a_last;
   logic [C_S00_AXIS_TDATA_WIDTH-1:0] a1a_data;
   logic signed [63:0] a1a_t1_sq_q262_s, a1a_t2_sq_q262_s;
@@ -184,10 +201,8 @@ module axis_ggx_reproject_normalize #
   wire a2_ready;
   wire s00_axis_fire = s00_axis_tvalid && s00_axis_tready;
 
-  wire signed [31:0] a0_t1_q131 = $signed(a0_data[31:0]);
-  wire signed [31:0] a0_t2_q131 = $signed(a0_data[63:32]);
-  wire signed [63:0] a1a_t1_sq_q262_s_w = sq_q131_to_q262(a0_t1_q131);
-  wire signed [63:0] a1a_t2_sq_q262_s_w = sq_q131_to_q262(a0_t2_q131);
+  wire signed [63:0] a1a_t1_sq_q262_s_w = mul_pre_q131_q131_to_q262(a0_t1_r18, a0_t1_r25);
+  wire signed [63:0] a1a_t2_sq_q262_s_w = mul_pre_q131_q131_to_q262(a0_t2_r18, a0_t2_r25);
   // t1^2 and t2^2 are non-negative for any input (even (-1.0)^2 = +1.0), so the
   // old sign-bit clamp to zero was dead logic on a register reset path; drop it.
   wire [63:0] a1_t1_sq_q262_u_w = $unsigned(a1a_t1_sq_q262_s);
@@ -271,11 +286,17 @@ module axis_ggx_reproject_normalize #
       a0_valid <= 1'b0;
       a0_last <= 1'b0;
       a0_data <= '0;
+      a0_t1_r18 <= '0; a0_t2_r18 <= '0;
+      a0_t1_r25 <= '0; a0_t2_r25 <= '0;
     end else begin
       if (s00_axis_fire) begin
         a0_valid <= 1'b1;
         a0_last <= s00_axis_tlast;
         a0_data <= s00_axis_tdata;
+        a0_t1_r18 <= rnd_s18($signed(s00_axis_tdata[31:0]));
+        a0_t1_r25 <= rnd_s25($signed(s00_axis_tdata[31:0]));
+        a0_t2_r18 <= rnd_s18($signed(s00_axis_tdata[63:32]));
+        a0_t2_r25 <= rnd_s25($signed(s00_axis_tdata[63:32]));
       end else if (a0_to_a1a) begin
         a0_valid <= 1'b0;
       end
@@ -411,13 +432,18 @@ module axis_ggx_reproject_normalize #
   (* keep = "true" *) logic signed [95:0] b0_t1, b0_t2, b0_vh;
   (* keep = "true" *) logic signed [31:0] b0_t1_s, b0_t2_s, b0_t3_s;
 
+  // B0P stores the operands ALREADY narrowed+rounded (18b 'a', 25b 'b'), so the
+  // round-half-up carry chain rides the B0->B0P fan-out register instead of
+  // sitting between B0P and the DSP. That leaves a clean reg -> DSP path and lets
+  // Vivado pack these as the DSP's AREG/BREG (the multiply then feeds MREG=B1A,
+  // PREG=B1P). Was WNS -4.14 with the rounding on the B0P->DSP path.
   logic b0p_valid, b0p_last;
-  logic signed [31:0] b0p_hx_t1_a, b0p_hx_t2_a, b0p_hx_vh_a;
-  logic signed [31:0] b0p_hy_t1_a, b0p_hy_t2_a, b0p_hy_vh_a;
-  logic signed [31:0] b0p_hz_t1_a, b0p_hz_t2_a, b0p_hz_vh_a;
-  logic signed [31:0] b0p_hx_t1_b, b0p_hx_t2_b, b0p_hx_vh_b;
-  logic signed [31:0] b0p_hy_t1_b, b0p_hy_t2_b, b0p_hy_vh_b;
-  logic signed [31:0] b0p_hz_t1_b, b0p_hz_t2_b, b0p_hz_vh_b;
+  logic signed [17:0] b0p_hx_t1_a, b0p_hx_t2_a, b0p_hx_vh_a;
+  logic signed [17:0] b0p_hy_t1_a, b0p_hy_t2_a, b0p_hy_vh_a;
+  logic signed [17:0] b0p_hz_t1_a, b0p_hz_t2_a, b0p_hz_vh_a;
+  logic signed [24:0] b0p_hx_t1_b, b0p_hx_t2_b, b0p_hx_vh_b;
+  logic signed [24:0] b0p_hy_t1_b, b0p_hy_t2_b, b0p_hy_vh_b;
+  logic signed [24:0] b0p_hz_t1_b, b0p_hz_t2_b, b0p_hz_vh_b;
 
   logic b1a_valid, b1a_last;
   logic signed [63:0] b1a_hx_t1_q262, b1a_hx_t2_q262, b1a_hx_vh_q262;
@@ -473,15 +499,15 @@ module axis_ggx_reproject_normalize #
   assign sqrt_out_fire = sqrt_out_valid && b0_ready;
   assign sqrt_out_ready = b0_ready;
 
-  wire signed [63:0] b1a_hx_t1_q262_w = mul_q131_q131_to_q262(b0p_hx_t1_a, b0p_hx_t1_b);
-  wire signed [63:0] b1a_hx_t2_q262_w = mul_q131_q131_to_q262(b0p_hx_t2_a, b0p_hx_t2_b);
-  wire signed [63:0] b1a_hx_vh_q262_w = mul_q131_q131_to_q262(b0p_hx_vh_a, b0p_hx_vh_b);
-  wire signed [63:0] b1a_hy_t1_q262_w = mul_q131_q131_to_q262(b0p_hy_t1_a, b0p_hy_t1_b);
-  wire signed [63:0] b1a_hy_t2_q262_w = mul_q131_q131_to_q262(b0p_hy_t2_a, b0p_hy_t2_b);
-  wire signed [63:0] b1a_hy_vh_q262_w = mul_q131_q131_to_q262(b0p_hy_vh_a, b0p_hy_vh_b);
-  wire signed [63:0] b1a_hz_t1_q262_w = mul_q131_q131_to_q262(b0p_hz_t1_a, b0p_hz_t1_b);
-  wire signed [63:0] b1a_hz_t2_q262_w = mul_q131_q131_to_q262(b0p_hz_t2_a, b0p_hz_t2_b);
-  wire signed [63:0] b1a_hz_vh_q262_w = mul_q131_q131_to_q262(b0p_hz_vh_a, b0p_hz_vh_b);
+  wire signed [63:0] b1a_hx_t1_q262_w = mul_pre_q131_q131_to_q262(b0p_hx_t1_a, b0p_hx_t1_b);
+  wire signed [63:0] b1a_hx_t2_q262_w = mul_pre_q131_q131_to_q262(b0p_hx_t2_a, b0p_hx_t2_b);
+  wire signed [63:0] b1a_hx_vh_q262_w = mul_pre_q131_q131_to_q262(b0p_hx_vh_a, b0p_hx_vh_b);
+  wire signed [63:0] b1a_hy_t1_q262_w = mul_pre_q131_q131_to_q262(b0p_hy_t1_a, b0p_hy_t1_b);
+  wire signed [63:0] b1a_hy_t2_q262_w = mul_pre_q131_q131_to_q262(b0p_hy_t2_a, b0p_hy_t2_b);
+  wire signed [63:0] b1a_hy_vh_q262_w = mul_pre_q131_q131_to_q262(b0p_hy_vh_a, b0p_hy_vh_b);
+  wire signed [63:0] b1a_hz_t1_q262_w = mul_pre_q131_q131_to_q262(b0p_hz_t1_a, b0p_hz_t1_b);
+  wire signed [63:0] b1a_hz_t2_q262_w = mul_pre_q131_q131_to_q262(b0p_hz_t2_a, b0p_hz_t2_b);
+  wire signed [63:0] b1a_hz_vh_q262_w = mul_pre_q131_q131_to_q262(b0p_hz_vh_a, b0p_hz_vh_b);
 
   wire signed [31:0] b1_hx_t1_w = scale_q262_to_q131(b1p_hx_t1_q262);
   wire signed [31:0] b1_hx_t2_w = scale_q262_to_q131(b1p_hx_t2_q262);
@@ -532,15 +558,15 @@ module axis_ggx_reproject_normalize #
       if (b0_to_b0p) begin
         b0p_valid <= 1'b1;
         b0p_last <= b0_last;
-        b0p_hx_t1_a <= $signed(b0_t1[31:0]);  b0p_hx_t1_b <= b0_t1_s;
-        b0p_hx_t2_a <= $signed(b0_t2[31:0]);  b0p_hx_t2_b <= b0_t2_s;
-        b0p_hx_vh_a <= $signed(b0_vh[31:0]);  b0p_hx_vh_b <= b0_t3_s;
-        b0p_hy_t1_a <= $signed(b0_t1[63:32]); b0p_hy_t1_b <= b0_t1_s;
-        b0p_hy_t2_a <= $signed(b0_t2[63:32]); b0p_hy_t2_b <= b0_t2_s;
-        b0p_hy_vh_a <= $signed(b0_vh[63:32]); b0p_hy_vh_b <= b0_t3_s;
-        b0p_hz_t1_a <= $signed(b0_t1[95:64]); b0p_hz_t1_b <= b0_t1_s;
-        b0p_hz_t2_a <= $signed(b0_t2[95:64]); b0p_hz_t2_b <= b0_t2_s;
-        b0p_hz_vh_a <= $signed(b0_vh[95:64]); b0p_hz_vh_b <= b0_t3_s;
+        b0p_hx_t1_a <= rnd_s18($signed(b0_t1[31:0]));  b0p_hx_t1_b <= rnd_s25(b0_t1_s);
+        b0p_hx_t2_a <= rnd_s18($signed(b0_t2[31:0]));  b0p_hx_t2_b <= rnd_s25(b0_t2_s);
+        b0p_hx_vh_a <= rnd_s18($signed(b0_vh[31:0]));  b0p_hx_vh_b <= rnd_s25(b0_t3_s);
+        b0p_hy_t1_a <= rnd_s18($signed(b0_t1[63:32])); b0p_hy_t1_b <= rnd_s25(b0_t1_s);
+        b0p_hy_t2_a <= rnd_s18($signed(b0_t2[63:32])); b0p_hy_t2_b <= rnd_s25(b0_t2_s);
+        b0p_hy_vh_a <= rnd_s18($signed(b0_vh[63:32])); b0p_hy_vh_b <= rnd_s25(b0_t3_s);
+        b0p_hz_t1_a <= rnd_s18($signed(b0_t1[95:64])); b0p_hz_t1_b <= rnd_s25(b0_t1_s);
+        b0p_hz_t2_a <= rnd_s18($signed(b0_t2[95:64])); b0p_hz_t2_b <= rnd_s25(b0_t2_s);
+        b0p_hz_vh_a <= rnd_s18($signed(b0_vh[95:64])); b0p_hz_vh_b <= rnd_s25(b0_t3_s);
       end else if (b0p_to_b1a) begin
         b0p_valid <= 1'b0;
       end

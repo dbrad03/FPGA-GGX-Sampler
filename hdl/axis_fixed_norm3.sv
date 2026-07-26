@@ -71,11 +71,15 @@ module axis_fixed_norm3#
 
   /// STAGE 00a: register inputs (breaks long comb path into module; allows DSP PREG in 00b)
   logic signed [31:0] x_in_r, y_in_r, z_in_r;
+  // 18-bit rounded operands for the squares, captured here alongside x_in_r so the
+  // round-half-up carry rides the input-capture path, not the reg -> DSP path.
+  logic signed [17:0] x18_r, y18_r, z18_r;
   logic              s00a_valid;
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
       x_in_r <= '0; y_in_r <= '0; z_in_r <= '0;
+      x18_r <= '0; y18_r <= '0; z18_r <= '0;
       s00a_valid <= 1'b0;
     end else if (norm_en) begin
       s00a_valid <= s00_axis_tvalid;
@@ -83,6 +87,9 @@ module axis_fixed_norm3#
         x_in_r <= in_x;
         y_in_r <= in_y;
         z_in_r <= in_z;
+        x18_r <= rnd_s18(in_x);
+        y18_r <= rnd_s18(in_y);
+        z18_r <= rnd_s18(in_z);
       end
     end
   end
@@ -127,12 +134,9 @@ module axis_fixed_norm3#
     end
   endfunction
 
-  wire signed [17:0] x18 = rnd_s18(x_in_r);
-  wire signed [17:0] y18 = rnd_s18(y_in_r);
-  wire signed [17:0] z18 = rnd_s18(z_in_r);
-  wire signed [35:0] x18_sq = x18 * x18; // Q2.34, single DSP
-  wire signed [35:0] y18_sq = y18 * y18;
-  wire signed [35:0] z18_sq = z18 * z18;
+  wire signed [35:0] x18_sq = x18_r * x18_r; // Q2.34, single DSP (registered operand)
+  wire signed [35:0] y18_sq = y18_r * y18_r;
+  wire signed [35:0] z18_sq = z18_r * z18_r;
   wire signed [63:0] x2_w = {x18_sq, 28'b0}; // Q2.34 -> Q2.62
   wire signed [63:0] y2_w = {y18_sq, 28'b0};
   wire signed [63:0] z2_w = {z18_sq, 28'b0};
