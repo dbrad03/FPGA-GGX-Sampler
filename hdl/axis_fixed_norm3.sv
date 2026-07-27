@@ -325,6 +325,18 @@ module axis_fixed_norm3#
     end
   endfunction
 
+  // Operands ALREADY narrowed+rounded upstream (registered), clean reg -> DSP.
+  function automatic logic signed [63:0] mul_pre_q131_q725_to_q856(
+    input logic signed [17:0] a_18,
+    input logic signed [24:0] b_25
+  );
+    logic signed [42:0] prod_q8_34;
+    begin
+      prod_q8_34 = a_18 * b_25;
+      mul_pre_q131_q725_to_q856 = 64'(prod_q8_34) <<< 22;
+    end
+  endfunction
+
   function automatic logic signed [31:0] scale_q856_to_q131(
     input logic signed [63:0] prod_q8_56,
     input logic         [3:0] shift
@@ -334,14 +346,41 @@ module axis_fixed_norm3#
     end
   endfunction
 
+  // Stage S3R: pre-round the normalize multiply operands (from the delay line +
+  // inv_sqrt output) into registers so the S3A DSP multiply is a clean reg -> DSP
+  // path. delayed_* and inv_len are already aligned at inv_out_valid; S3R just
+  // registers them narrowed. Adds one cycle to norm3's latency (shift/branch ride
+  // through), absorbed by the elastic consumers (event_basis s2a, reproject META).
+  logic s3r_valid;
+  logic [3:0] s3r_shift;
+  logic signed [17:0] dx_r18, dy_r18, dz_r18;
+  logic signed [24:0] invlen_r25;
+  always_ff @(posedge s00_axis_aclk) begin
+    if (s00_axis_aresetn==0) begin
+      s3r_valid <= 1'b0;
+      s3r_shift <= '0;
+      dx_r18 <= '0; dy_r18 <= '0; dz_r18 <= '0;
+      invlen_r25 <= '0;
+    end else if (pipe_en) begin
+      s3r_valid <= inv_out_valid;
+      if (inv_out_valid) begin
+        s3r_shift  <= delayed_shift;
+        dx_r18     <= rnd_s18(delayed_x);
+        dy_r18     <= rnd_s18(delayed_y);
+        dz_r18     <= rnd_s18(delayed_z);
+        invlen_r25 <= rnd_u25(inv_len_q7_25);
+      end
+    end
+  end
+
   logic s3a_valid, s3b_valid;
   logic [3:0] s3a_shift;
   logic signed [63:0] s3a_x_q856, s3a_y_q856, s3a_z_q856;
   logic signed [31:0] s3b_x_q131, s3b_y_q131, s3b_z_q131;
 
-  wire signed [63:0] s3a_x_q856_w = mul_q131_q725_to_q856(delayed_x, inv_len_q7_25);
-  wire signed [63:0] s3a_y_q856_w = mul_q131_q725_to_q856(delayed_y, inv_len_q7_25);
-  wire signed [63:0] s3a_z_q856_w = mul_q131_q725_to_q856(delayed_z, inv_len_q7_25);
+  wire signed [63:0] s3a_x_q856_w = mul_pre_q131_q725_to_q856(dx_r18, invlen_r25);
+  wire signed [63:0] s3a_y_q856_w = mul_pre_q131_q725_to_q856(dy_r18, invlen_r25);
+  wire signed [63:0] s3a_z_q856_w = mul_pre_q131_q725_to_q856(dz_r18, invlen_r25);
 
   wire signed [31:0] s3b_x_q131_w = scale_q856_to_q131(s3a_x_q856, s3a_shift);
   wire signed [31:0] s3b_y_q131_w = scale_q856_to_q131(s3a_y_q856, s3a_shift);
@@ -364,9 +403,9 @@ module axis_fixed_norm3#
       // m00_axis_tlast <= 1'b0;
       // m00_axis_tstrb <= '1;
     end else if (pipe_en) begin
-      s3a_valid <= inv_out_valid;
-      if (inv_out_valid) begin
-        s3a_shift <= delayed_shift;
+      s3a_valid <= s3r_valid;
+      if (s3r_valid) begin
+        s3a_shift <= s3r_shift;
         s3a_x_q856 <= s3a_x_q856_w;
         s3a_y_q856 <= s3a_y_q856_w;
         s3a_z_q856 <= s3a_z_q856_w;
