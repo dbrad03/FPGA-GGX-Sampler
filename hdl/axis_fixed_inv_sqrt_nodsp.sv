@@ -60,7 +60,8 @@ module axis_fixed_inv_sqrt_nodsp #
   wire sqrt_in_ready;
 
   axis_fixed_sqrt #(
-    .FRAC_BITS(32)
+    .FRAC_BITS(32),
+    .SIG_BITS(24)   // 24 sig bits: sqrt bias ~-3e-8, negligible vs 8e-6 gate; narrows the recurrence add
   ) u_sqrt (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
@@ -113,17 +114,22 @@ module axis_fixed_inv_sqrt_nodsp #
   // delay_div matches axis_fixed_div's latency: the 2-phase (sub/select) split
   // doubled div's step count, so its latency went 59 -> 116 cycles (index 0:115).
   localparam int DIV_DLY = 115;
-  logic [99:0] delay_sqrt [0:33];
+  // sqrt latency = SIG_BITS + 2; this exact-match sideband delay line must equal
+  // it (unlike reproject/projected_area's elastic FIFOs, which only need to
+  // exceed the latency). Keep SQRT_SIG in sync with u_sqrt's .SIG_BITS below.
+  localparam int SQRT_SIG = 24;
+  localparam int SQRT_DLY = SQRT_SIG + 2;      // == number of delay taps
+  logic [99:0] delay_sqrt [0:SQRT_DLY-1];
   logic [99:0] delay_div  [0:DIV_DLY];
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn == 0) begin
-      for (int j = 0; j <= 33; j = j + 1) begin
+      for (int j = 0; j < SQRT_DLY; j = j + 1) begin
         delay_sqrt[j] <= '0;
       end
     end else if (sqrt_pipe_en) begin
       delay_sqrt[0] <= {s00_axis_user_x, s00_axis_user_y, s00_axis_user_z, s00_axis_user_shift};
-      for (int j = 1; j <= 33; j = j + 1) begin
+      for (int j = 1; j < SQRT_DLY; j = j + 1) begin
         delay_sqrt[j] <= delay_sqrt[j-1];
       end
     end
@@ -135,7 +141,7 @@ module axis_fixed_inv_sqrt_nodsp #
         delay_div[j] <= '0;
       end
     end else if (div_pipe_en) begin
-      delay_div[0] <= delay_sqrt[33];
+      delay_div[0] <= delay_sqrt[SQRT_DLY-1];
       for (int j = 1; j <= DIV_DLY; j = j + 1) begin
         delay_div[j] <= delay_div[j-1];
       end

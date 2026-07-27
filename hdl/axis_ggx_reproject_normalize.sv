@@ -261,7 +261,8 @@ module axis_ggx_reproject_normalize #
   );
 
   axis_fixed_sqrt #(
-    .FRAC_BITS(FRAC_BITS)
+    .FRAC_BITS(FRAC_BITS),
+    .SIG_BITS(24)
   ) u_sqrt_t3 (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),

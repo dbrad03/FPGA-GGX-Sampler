@@ -109,7 +109,8 @@ module axis_ggx_projected_area #
   logic sqrt_r_out_ready;
 
   axis_fixed_sqrt #(
-    .FRAC_BITS(FRAC_BITS)
+    .FRAC_BITS(FRAC_BITS),
+    .SIG_BITS(24)
   ) u_sqrt_r (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
@@ -341,7 +342,8 @@ module axis_ggx_projected_area #
   wire out_pipe_en = m00_axis_tready || !m00_axis_tvalid;
 
   axis_fixed_sqrt #(
-    .FRAC_BITS(FRAC_BITS)
+    .FRAC_BITS(FRAC_BITS),
+    .SIG_BITS(24)
   ) u_sqrt_t (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
