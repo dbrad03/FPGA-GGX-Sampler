@@ -1,6 +1,15 @@
 `timescale 1ns / 1ps
 `default_nettype none
-
+// Non-restoring binary long division, digit-recurrence, fully pipelined.
+//
+// Each iteration is SPLIT across two pipeline stages so the wide subtract no
+// longer shares a cycle with the borrow-check remainder mux + quotient update:
+//   SUB stage:    trial_sub = shifted_rem - divisor        (the WIDTH+1 subtract)
+//   SELECT stage: borrow = trial_sub[WIDTH];               (mux + quotient bit)
+//                 rem  = borrow ? shifted_rem : trial_sub
+//                 q    = (q<<1) | ~borrow
+// This isolates the subtract's carry chain from the select logic (was one fused
+// stage). Doubles the stage count (latency, not throughput); result bit-identical.
 module axis_fixed_div #
   (
     parameter integer WIDTH     = 32,
@@ -21,7 +30,6 @@ module axis_fixed_div #
     output logic [(WIDTH/8)-1: 0] m00_axis_tstrb
   );
 
-  // Unused AXIS signals
   wire _unused_s00_tlast = s00_axis_tlast;
   wire _unused_s00_tstrb = ^s00_axis_tstrb;
   wire _unused_m00_aclk = m00_axis_aclk;
@@ -33,28 +41,33 @@ module axis_fixed_div #
   assign m00_axis_tlast = 1'b0;
   assign m00_axis_tstrb = '1;
 
-  localparam int STAGES = WIDTH + FRAC_BITS; // 32 + 25 = 57 stages
+  localparam int ITERS      = WIDTH + FRAC_BITS; // 57 division steps
+  localparam int NST        = 2 * ITERS;         // two pipeline stages per step
   localparam int DIVIDEND_W = WIDTH + FRAC_BITS;
 
-  logic [STAGES:0] valid;
-  logic [DIVIDEND_W-1:0] dividend [0:STAGES];
-  logic [WIDTH-1:0]      divisor  [0:STAGES];
-  logic [WIDTH-1:0]      rem      [0:STAGES];
-  logic [DIVIDEND_W-1:0] q        [0:STAGES];
+  logic [NST:0]          valid;
+  logic [DIVIDEND_W-1:0] dividend [0:NST];
+  logic [WIDTH-1:0]      divisor  [0:NST];
+  logic [WIDTH-1:0]      rem      [0:NST];
+  logic [DIVIDEND_W-1:0] q        [0:NST];
+  logic [WIDTH:0]        trial    [0:NST]; // trial_sub, SUB stage -> SELECT stage
+  logic [WIDTH:0]        shft     [0:NST]; // shifted_rem, SUB stage -> SELECT stage
 
-  logic [WIDTH:0] trial_sub; // WIDTH+1 bits to detect borrow
-  logic [WIDTH:0] shifted_rem; // WIDTH+1 bits to prevent MSB loss on shift
-  logic next_bit;
+  // combinational temporaries (module scope for Icarus)
+  logic [WIDTH:0] shifted_c;
+  logic           borrow_c;
+  integer j;
 
-  integer i;
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn == 0) begin
-      for (i = 0; i <= STAGES; i = i + 1) begin
-        valid[i]    <= 1'b0;
-        dividend[i] <= '0;
-        divisor[i]  <= '0;
-        rem[i]      <= '0;
-        q[i]        <= '0;
+      for (j = 0; j <= NST; j = j + 1) begin
+        valid[j]    <= 1'b0;
+        dividend[j] <= '0;
+        divisor[j]  <= '0;
+        rem[j]      <= '0;
+        q[j]        <= '0;
+        trial[j]    <= '0;
+        shft[j]     <= '0;
       end
       m00_axis_tvalid <= 1'b0;
       m00_axis_tdata  <= '0;
@@ -62,49 +75,42 @@ module axis_fixed_div #
       // STAGE 0 LOAD
       valid[0] <= s00_axis_tvalid;
       if (s00_axis_tvalid) begin
-        // dividend is A shifted left by FRAC_BITS
         dividend[0] <= {s00_axis_tdata[2*WIDTH-1 : WIDTH], {FRAC_BITS{1'b0}}};
         divisor[0]  <= s00_axis_tdata[WIDTH-1 : 0];
-        rem[0]      <= '0;
-        q[0]        <= '0;
       end else begin
         dividend[0] <= '0;
         divisor[0]  <= '0;
-        rem[0]      <= '0;
-        q[0]        <= '0;
       end
+      rem[0]   <= '0;
+      q[0]     <= '0;
+      trial[0] <= '0;
+      shft[0]  <= '0;
 
-      // STAGES 0 to STAGES-1
-      for (i = 0; i < STAGES; i = i + 1) begin
-        valid[i+1]   <= valid[i];
-        divisor[i+1] <= divisor[i];
-
-        // Shift remainder left by 1, and bring in the MSB of the dividend
-        shifted_rem = {rem[i], dividend[i][DIVIDEND_W-1]};
-        
-        // Subtract divisor
-        trial_sub = shifted_rem - {1'b0, divisor[i]};
-
-        if (trial_sub[WIDTH] == 1'b0) begin
-          // No borrow, trial_sub is non-negative
-          rem[i+1] <= trial_sub[WIDTH-1:0];
-          q[i+1]   <= (q[i] << 1) | 1'b1;
+      for (j = 0; j < NST; j = j + 1) begin
+        valid[j+1]   <= valid[j];
+        divisor[j+1] <= divisor[j];
+        if (j % 2 == 0) begin
+          // SUB stage: compute the WIDTH+1 subtract only
+          shifted_c    = {rem[j], dividend[j][DIVIDEND_W-1]};
+          shft[j+1]    <= shifted_c;
+          trial[j+1]   <= shifted_c - {1'b0, divisor[j]};
+          rem[j+1]     <= rem[j];
+          dividend[j+1] <= dividend[j];
+          q[j+1]       <= q[j];
         end else begin
-          // Borrow occurred, restore remainder
-          rem[i+1] <= shifted_rem[WIDTH-1:0];
-          q[i+1]   <= (q[i] << 1);
+          // SELECT stage: borrow check -> remainder mux + quotient bit + shift
+          borrow_c      = trial[j][WIDTH];
+          rem[j+1]      <= borrow_c ? shft[j][WIDTH-1:0] : trial[j][WIDTH-1:0];
+          q[j+1]        <= (q[j] << 1) | (borrow_c ? 1'b0 : 1'b1);
+          dividend[j+1] <= dividend[j] << 1;
+          trial[j+1]    <= trial[j];
+          shft[j+1]     <= shft[j];
         end
-
-        // Shift dividend left
-        dividend[i+1] <= dividend[i] << 1;
       end
 
       // OUTPUT REGISTER
-      m00_axis_tvalid <= valid[STAGES];
-      if (valid[STAGES]) begin
-        // Since we did WIDTH + FRAC_BITS stages, the quotient is in q[STAGES]
-        m00_axis_tdata <= q[STAGES][WIDTH-1:0];
-      end
+      m00_axis_tvalid <= valid[NST];
+      if (valid[NST]) m00_axis_tdata <= q[NST][WIDTH-1:0];
     end
   end
 

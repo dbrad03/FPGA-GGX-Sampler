@@ -28,7 +28,7 @@ module axis_ggx_event_basis #
 	);
 
 	localparam int NORM_LATENCY = 10;
-	localparam int INVSQRT_LATENCY = 93; // Latency of axis_fixed_inv_sqrt_nodsp
+	localparam int INVSQRT_LATENCY = 150; // Latency of axis_fixed_inv_sqrt_nodsp (unused; informational)
 	localparam logic signed [FRAC_BITS-1:0] ONE_Q1 		 = 32'h7FFF_FFFF; // 1 in Q1.31
 	localparam logic signed [FRAC_BITS-1:0] NEG_ONE_Q1 = 32'h8000_0000; // -1
 	localparam logic 		[FRAC_BITS-1:0] ONE_Q0 		 = 32'hFFFF_FFFF; // 1 in UQ0.32

@@ -31,10 +31,11 @@ module axis_ggx_reproject_normalize #
 
   localparam int META0_DEPTH = 128;
   localparam int META0_AW    = $clog2(META0_DEPTH);
-  // norm3 wraps the ~93-cycle no-DSP inverse-sqrt, so its worst-case in-flight
-  // occupancy far exceeds 32; META1 must be deeper than that latency or the
-  // TLAST-tracking FIFO overflows (spurious TLAST). Sized to 128 with margin.
-  localparam int META1_DEPTH = 128;
+  // norm3 wraps the no-DSP inverse-sqrt; META1 must be deeper than norm3's
+  // in-flight latency or the TLAST-tracking FIFO overflows (spurious TLAST).
+  // Bumped 128 -> 256: the 2-phase div split grew inv_sqrt_nodsp (~93 -> ~150),
+  // so norm3 is now ~165-cycle latency.
+  localparam int META1_DEPTH = 256;
   localparam int META1_AW    = $clog2(META1_DEPTH);
 
   localparam logic [31:0] ONE_UQ0_32 = 32'hFFFF_FFFF;

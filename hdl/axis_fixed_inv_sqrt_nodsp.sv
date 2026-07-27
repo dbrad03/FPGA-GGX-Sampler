@@ -110,8 +110,11 @@ module axis_fixed_inv_sqrt_nodsp #
   wire sqrt_pipe_en = div_in_ready || !sqrt_out_valid;
   wire div_pipe_en = m00_axis_tready || !div_out_valid;
 
+  // delay_div matches axis_fixed_div's latency: the 2-phase (sub/select) split
+  // doubled div's step count, so its latency went 59 -> 116 cycles (index 0:115).
+  localparam int DIV_DLY = 115;
   logic [99:0] delay_sqrt [0:33];
-  logic [99:0] delay_div  [0:58];
+  logic [99:0] delay_div  [0:DIV_DLY];
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn == 0) begin
@@ -128,21 +131,21 @@ module axis_fixed_inv_sqrt_nodsp #
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn == 0) begin
-      for (int j = 0; j <= 58; j = j + 1) begin
+      for (int j = 0; j <= DIV_DLY; j = j + 1) begin
         delay_div[j] <= '0;
       end
     end else if (div_pipe_en) begin
       delay_div[0] <= delay_sqrt[33];
-      for (int j = 1; j <= 58; j = j + 1) begin
+      for (int j = 1; j <= DIV_DLY; j = j + 1) begin
         delay_div[j] <= delay_div[j-1];
       end
     end
   end
 
-  assign m00_axis_user_x     = delay_div[58][99:68];
-  assign m00_axis_user_y     = delay_div[58][67:36];
-  assign m00_axis_user_z     = delay_div[58][35:4];
-  assign m00_axis_user_shift = delay_div[58][3:0];
+  assign m00_axis_user_x     = delay_div[DIV_DLY][99:68];
+  assign m00_axis_user_y     = delay_div[DIV_DLY][67:36];
+  assign m00_axis_user_z     = delay_div[DIV_DLY][35:4];
+  assign m00_axis_user_shift = delay_div[DIV_DLY][3:0];
 
   // Map to top-level outputs
   assign s00_axis_tready = sqrt_in_ready;

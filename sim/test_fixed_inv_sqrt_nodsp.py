@@ -183,10 +183,10 @@ async def test_inv_sqrt_nodsp(dut):
     ind.append({"type": "write_burst", "contents": {"data": input_data}})
 
     # Read Outputs
-    outd.append({"type": "read_burst", "duration": len(input_data) + 150})
+    outd.append({"type": "read_burst", "duration": len(input_data) + 230})
 
-    # Wait for completion (pipeline latency is 89 cycles)
-    await ClockCycles(dut.s00_axis_aclk, len(input_data) + 120)
+    # Wait for completion (pipeline latency ~146 cycles after the 2-phase div split)
+    await ClockCycles(dut.s00_axis_aclk, len(input_data) + 210)
 
     assert len(sig_out_exp) == 0, f"Scoreboard mismatch! {len(sig_out_exp)} expected items remaining."
     assert inm.transactions == outm.transactions, f"Count mismatch! In: {inm.transactions}, Out: {outm.transactions}"
