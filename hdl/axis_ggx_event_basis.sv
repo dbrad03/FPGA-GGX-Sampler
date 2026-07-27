@@ -94,6 +94,19 @@ module axis_ggx_event_basis #
 		end
 	endfunction
 
+	// Operands ALREADY narrowed+rounded upstream (registered), clean reg -> DSP.
+	// The `>>>10` (with round constant) is a constant shift = free bit-select.
+	function automatic logic signed [31:0] mul_pre_q131_uq032_to_q131(
+		input logic signed [17:0] q131_18,
+		input logic signed [24:0] uq032_25
+	);
+		logic signed [42:0] prod_q1_41;
+		begin
+			prod_q1_41 = q131_18 * uq032_25;
+			mul_pre_q131_uq032_to_q131 = 32'((prod_q1_41 + 43'sh200) >>> 10);
+		end
+	endfunction
+
 	// Quantized to a single DSP48E1 (18b x 25b) with round-half-up operands.
 	// Q1.31 x Q1.31 -> Q2.62, low bits zero-filled.
 	function automatic logic signed [63:0] mul_q131_q131_to_q262(
@@ -124,6 +137,18 @@ module axis_ggx_event_basis #
 		begin
 				prod_q2_41 = a_18 * b_25;
 				mul_pre_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;
+		end
+	endfunction
+
+	// Operands ALREADY narrowed+rounded upstream (registered), clean reg -> DSP.
+	function automatic logic signed [63:0] mul_pre_q131_q725_to_q856(
+		input logic signed [17:0] a_18,
+		input logic signed [24:0] b_25
+	);
+		logic signed [42:0] prod_q8_34;
+		begin
+			prod_q8_34 = a_18 * b_25;
+			mul_pre_q131_q725_to_q856 = 64'(prod_q8_34) <<< 22;
 		end
 	endfunction
 
@@ -197,6 +222,28 @@ module axis_ggx_event_basis #
   wire inv_out_valid;
 	logic [31:0] inv_len_q7_25;
 
+	/// STAGE 0R: pre-round the warp multiply operands into registers so stage 0's
+	/// DSP multiply is a clean reg -> DSP path. Shares the norm_en enable, so the
+	/// whole front (s0r, s0) stalls together with no data loss; adds one cycle.
+	logic s0r_valid;
+	logic signed [17:0] vx_r18, vy_r18;
+	logic signed [24:0] alpha_r25;
+	logic signed [31:0] vz_0r;
+	always_ff @(posedge s00_axis_aclk) begin
+		if (s00_axis_aresetn==0) begin
+			s0r_valid <= 1'b0;
+			vx_r18 <= '0; vy_r18 <= '0; alpha_r25 <= '0; vz_0r <= '0;
+		end else if (norm_en) begin
+			s0r_valid <= s00_axis_tvalid;
+			if (s00_axis_tvalid) begin
+				vx_r18    <= rnd_s18(view_x_in);
+				vy_r18    <= rnd_s18(view_y_in);
+				alpha_r25 <= rnd_u25(alpha_in);
+				vz_0r     <= view_z_in;
+			end
+		end
+	end
+
 	/// STAGE 0: WARP VIEW VECTOR
 	logic s0_valid;
 	logic signed [31:0] vx_scaled, vy_scaled, vz_00; // Q1.31
@@ -205,11 +252,11 @@ module axis_ggx_event_basis #
 			s0_valid <= 1'b0;
 			vx_scaled <= '0; vy_scaled <= '0; vz_00 <= '0;
 		end else if (norm_en) begin
-			s0_valid <= s00_axis_tvalid;
-			if (s00_axis_tvalid) begin
-				vx_scaled <= mul_q131_uq032_to_q131(view_x_in, alpha_in);
-				vy_scaled <= mul_q131_uq032_to_q131(view_y_in, alpha_in);
-				vz_00 		<= view_z_in;
+			s0_valid <= s0r_valid;
+			if (s0r_valid) begin
+				vx_scaled <= mul_pre_q131_uq032_to_q131(vx_r18, alpha_r25);
+				vy_scaled <= mul_pre_q131_uq032_to_q131(vy_r18, alpha_r25);
+				vz_00 		<= vz_0r;
 			end
 		end
 	end
@@ -367,6 +414,33 @@ module axis_ggx_event_basis #
     .m00_axis_user_shift(delayed_shift)
   );
 
+	/// STAGE 3R: pre-round the stage-4a multiply operands (from the inv_sqrt
+	/// output) into registers, so 4a's DSP multiply is a clean reg -> DSP path.
+	/// Adds one pipeline cycle; Vh and use_inv_sqrt ride through it so everything
+	/// downstream stays aligned.
+	logic s3r_valid;
+	logic use_inv_sqrt_3r;
+	logic [95:0] Vh_3r;
+	logic signed [17:0] vhy_r18_3r, vhx_r18_3r;
+	logic signed [24:0] invlen_r25_3r;
+	always_ff @(posedge s00_axis_aclk) begin
+		if (s00_axis_aresetn==0) begin
+			s3r_valid <= 1'b0;
+			use_inv_sqrt_3r <= 1'b0;
+			Vh_3r <= '0;
+			vhy_r18_3r <= '0; vhx_r18_3r <= '0; invlen_r25_3r <= '0;
+		end else if (pipe_en) begin
+			s3r_valid <= inv_out_valid;
+			if (inv_out_valid) begin
+				use_inv_sqrt_3r <= use_inv_sqrt;
+				Vh_3r <= delayed_Vh;
+				vhy_r18_3r    <= rnd_s18($signed(delayed_Vh[63:32]));
+				vhx_r18_3r    <= rnd_s18($signed(delayed_Vh[31:0]));
+				invlen_r25_3r <= rnd_u25(inv_len_q7_25);
+			end
+		end
+	end
+
 	/// STAGE 4: FORM T1
 	logic s4a_valid, s4b_valid, s4c_valid;
 	logic use_inv_sqrt_40, use_inv_sqrt_41, use_inv_sqrt_42;
@@ -394,13 +468,13 @@ module axis_ggx_event_basis #
 			vh42_z_r18 <= '0; vh42_x_r18 <= '0; vh42_y_r18 <= '0;
 			Vh_40 <= '0; Vh_41 <= '0; Vh_42 <= '0;
 		end else if (pipe_en) begin
-			s4a_valid <= inv_out_valid;
-			if (inv_out_valid) begin
-				use_inv_sqrt_40 <= use_inv_sqrt;
-				Vh_40 <= delayed_Vh;
-				if (use_inv_sqrt) begin
-					t1a_x <= mul_q131_q725_to_q856($signed(delayed_Vh[63:32]), inv_len_q7_25);
-					t1a_y <= mul_q131_q725_to_q856($signed(delayed_Vh[31:0]), inv_len_q7_25);
+			s4a_valid <= s3r_valid;
+			if (s3r_valid) begin
+				use_inv_sqrt_40 <= use_inv_sqrt_3r;
+				Vh_40 <= Vh_3r;
+				if (use_inv_sqrt_3r) begin
+					t1a_x <= mul_pre_q131_q725_to_q856(vhy_r18_3r, invlen_r25_3r);
+					t1a_y <= mul_pre_q131_q725_to_q856(vhx_r18_3r, invlen_r25_3r);
 				end
 			end
 
