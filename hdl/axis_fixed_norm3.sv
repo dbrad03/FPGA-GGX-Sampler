@@ -98,7 +98,7 @@ module axis_fixed_norm3#
   /// Driving from a registered source lets Vivado infer DSP PREG, cutting the
   /// external-input → y2_reg carry chain that was causing the -4.3 ns violation.
   /// Squares of real numbers are always non-negative in Q2.62, so no sign check needed.
-  logic        [63:0] x2, y2, z2;        // magnitude squared Q2.62 (unsigned)
+  logic        [35:0] x2, y2, z2;        // magnitude squared Q2.34 (unsigned)
   logic        [31:0] x00, y00, z00;     // registered input copy for downstream alignment
   logic              dims_sq_valid;
   // Quantize the square operands to 18-bit (Q1.17 = top 18 bits of the Q1.31
@@ -137,9 +137,14 @@ module axis_fixed_norm3#
   wire signed [35:0] x18_sq = x18_r * x18_r; // Q2.34, single DSP (registered operand)
   wire signed [35:0] y18_sq = y18_r * y18_r;
   wire signed [35:0] z18_sq = z18_r * z18_r;
-  wire signed [63:0] x2_w = {x18_sq, 28'b0}; // Q2.34 -> Q2.62
-  wire signed [63:0] y2_w = {y18_sq, 28'b0};
-  wire signed [63:0] z2_w = {z18_sq, 28'b0};
+  // Keep the squares at their natural Q2.34 width. The old code zero-extended to
+  // Q2.62 ({x18_sq, 28'b0}); those low 28 bits are structurally zero, so the
+  // lensq sum, the 66-way MSB scan and the barrel shifter all ran 28 bits too
+  // wide. Drop them here (accuracy-neutral) -- everything downstream is
+  // re-indexed by -28 (thresholds, output slice). Squares are non-negative.
+  wire [35:0] x2_w = $unsigned(x18_sq); // Q2.34
+  wire [35:0] y2_w = $unsigned(y18_sq);
+  wire [35:0] z2_w = $unsigned(z18_sq);
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
@@ -161,8 +166,8 @@ module axis_fixed_norm3#
   /// 64-bit carry chains no longer chain within one cycle (this was the -0.827
   /// ns lensq critical path). z^2 and the x/y/z passthrough are delayed one
   /// stage to stay aligned.
-  logic [64:0]        xy2_sum;
-  logic [63:0]        z2_d;
+  logic [36:0]        xy2_sum;   // x2 + y2, Q3.34
+  logic [35:0]        z2_d;      // z2 held one stage, Q2.34
   logic signed [31:0] x000, y000, z000;
   logic               sq_valid_0;
 
@@ -182,21 +187,21 @@ module axis_fixed_norm3#
   end
 
   /// STAGE 01a: final sum (+ z^2)
-  logic [65:0] lensq_q2_62;
+  logic [37:0] lensq_q4_34;   // x2+y2+z2, Q4.34 (was Q2.62 with 28 dead low bits)
   logic signed [31:0] x01a, y01a, z01a;
   logic              lensq_valid_a;
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
       lensq_valid_a <= 1'b0;
-      lensq_q2_62   <= '0;
+      lensq_q4_34   <= '0;
       x01a <= 0;
       y01a <= 0;
       z01a <= 0;
     end else if (norm_en) begin
       lensq_valid_a <= sq_valid_0;
       if (sq_valid_0) begin
-        lensq_q2_62 <= {1'b0, xy2_sum} + {2'b0, z2_d};
+        lensq_q4_34 <= {1'b0, xy2_sum} + {2'b0, z2_d};
         x01a <= x000;
         y01a <= y000;
         z01a <= z000;
@@ -206,26 +211,28 @@ module axis_fixed_norm3#
 
   /// MSB Index and Shift logic on registered sum lensq_q2_62
   logic [3:0] lensq_shift;
-  logic [6:0] msb_idx;
+  logic [5:0] msb_idx;   // 0..37 now (was 0..65 in the Q2.62 form)
   always_comb begin
     msb_idx = '0;
-    for (int i = 0; i <= 65; i=i+1) begin
-      if (lensq_q2_62[i])
-        msb_idx = i[6:0];
+    for (int i = 0; i <= 37; i=i+1) begin
+      if (lensq_q4_34[i])
+        msb_idx = i[5:0];
     end
-    if (msb_idx <= 61) begin
+    // Thresholds re-indexed by -28 vs the old Q2.62 form (61 -> 33).
+    if (msb_idx <= 33) begin
       lensq_shift = 0;
     end else begin
-      logic [6:0] d;
-      d = msb_idx - 7'd61;
+      logic [5:0] d;
+      d = msb_idx - 6'd33;
       lensq_shift = (d[0]) ? ( (d>>1) + 1 ) : (d>>1);
     end
   end
 
-  logic [65:0] lensq_q2_62_shifted;
+  logic [37:0] lensq_q4_34_shifted;
   logic [31:0] lensq_q0_32_shifted;
-  assign lensq_q2_62_shifted = lensq_q2_62 >> (lensq_shift << 1);
-  assign lensq_q0_32_shifted = lensq_q2_62_shifted[61:30];
+  assign lensq_q4_34_shifted = lensq_q4_34 >> (lensq_shift << 1);
+  // Old slice [61:30] of the Q2.62 form == [33:2] here (all indices -28).
+  assign lensq_q0_32_shifted = lensq_q4_34_shifted[33:2];
 
   /// STAGE 01b: register shift and shifted lensq
   logic signed [31:0] x01, y01, z01;
