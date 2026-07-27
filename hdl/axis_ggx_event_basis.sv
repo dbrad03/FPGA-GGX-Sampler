@@ -271,6 +271,8 @@ module axis_ggx_event_basis #
 	wire s2b_advance;
 	wire s2a_ready;
 	wire s2a_load;
+	wire s2r_ready;
+	wire s2r_to_s2a;
 
 	axis_fixed_norm3 normalize_warped_view (
 		.s00_axis_aclk(s00_axis_aclk),
@@ -287,8 +289,18 @@ module axis_ggx_event_basis #
     .m00_axis_tvalid(norm_out_valid),
     .m00_axis_tdata(norm_out),
     .m00_axis_tstrb(),
-    .m00_axis_tready(s2a_ready)
+    .m00_axis_tready(s2r_ready)
 	);
+
+	/// STAGE 2R: elastic stage that registers the ROUNDED z operand ahead of the
+	/// z^2 square, so the square (stage 2) is a clean reg -> DSP -> reg multiply
+	/// instead of norm3_out -> rnd_s25 (5x CARRY4) -> DSP. Adds one cycle; the
+	/// stall handshake mirrors the existing s2a/s2b stages.
+	logic s2r_valid;
+	logic signed [17:0] vhz_r18;
+	logic signed [24:0] vhz_r25;
+	logic [95:0] Vh_2r;
+	wire s2r_load = norm_out_valid && s2r_ready;
 
 	/// STAGE 2: COMPUTE LENGTH SQAURED (vhx^2 + vhy^2)
 	logic signed [63:0] z2_q262;
@@ -316,19 +328,41 @@ module axis_ggx_event_basis #
 	// Upstream Handshake
 	assign s2b_advance = s2a_valid && stage_2a_ready;
 	assign s2a_ready = !s2a_valid || stage_2a_ready;
-	assign s2a_load  = norm_out_valid && s2a_ready;
-	
+	// s2r feeds s2a: s2r advances into s2a when s2r has data and s2a can accept.
+	assign s2r_to_s2a = s2r_valid && s2a_ready;
+	assign s2r_ready  = !s2r_valid || s2r_to_s2a;
+	assign s2a_load   = s2r_to_s2a;
+
+	// STAGE 2R -- register the rounded z operand (round rides norm3_out -> reg,
+	// off the DSP path).
+	always_ff @(posedge s00_axis_aclk) begin
+		if (s00_axis_aresetn==0) begin
+			s2r_valid <= 1'b0;
+			vhz_r18 <= '0; vhz_r25 <= '0;
+			Vh_2r <= '0;
+		end else begin
+			if (s2r_load) begin
+				s2r_valid <= 1'b1;
+				vhz_r18 <= rnd_s18(vh_z);
+				vhz_r25 <= rnd_s25(vh_z);
+				Vh_2r   <= norm_out[95:0];
+			end else if (s2r_to_s2a) begin
+				s2r_valid <= 1'b0;
+			end
+		end
+	end
+
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
 			s2a_valid <= 1'b0;
 			Vh_20			<= '0;
 			z2_q262 	<= '0;
 		end else begin
-			// STAGE 2 -- capture normalized warped vector when we can
+			// STAGE 2 -- square the pre-rounded operand (clean reg -> DSP -> reg)
 			if (s2a_load) begin
 				s2a_valid <= 1'b1;
-				z2_q262 <= mul_q131_q131_to_q262(vh_z, vh_z);
-				Vh_20		<= norm_out[95:0];
+				z2_q262 <= mul_pre_q131_q131_to_q262(vhz_r18, vhz_r25);
+				Vh_20		<= Vh_2r;
 			end else if (s2b_advance) begin
 				s2a_valid <= 1'b0; // don't need per se
 			end
