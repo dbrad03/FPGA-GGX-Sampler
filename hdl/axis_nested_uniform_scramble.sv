@@ -46,19 +46,27 @@ module axis_nested_uniform_scramble #
     s00_axis_tready = !stall;
   end
 
-  logic [DATA_WIDTH-1:0] data_pipeline [0:10];
-  logic [10:0]           valid_pipeline, last_pipeline;
-  logic [SEED_WIDTH-1:0] seed_pipeline [0:10];
-
-  logic [DATA_WIDTH-1:0] data_pipeline_d [1:4];
+  // ---------------------------------------------------------------------------
+  // Sideband (valid / last / seed) delay line.
+  //
+  // This module deliberately does NOT align its own TVALID with its own TDATA:
+  // the data-math path runs deeper than the sideband path, so the output data
+  // lags the valid/last/seed markers by a fixed VALID_DATA_OFFSET. The sampler
+  // (axis_pre_ggx_sampler) is co-tuned to that offset, so it MUST be preserved.
+  //
+  // Splitting each round's cmul_sum ternary add into its own register (see
+  // below) added 4 cycles to the data path; SIDEBAND_DEPTH grows by the same 4
+  // so the offset is UNCHANGED (still -4) and no system-level retuning is
+  // needed. Data latency = SIDEBAND_DEPTH + 4 cycles.
+  localparam int SIDEBAND_DEPTH = 14;   // was 10 before the cmul_sum split
+  logic [SIDEBAND_DEPTH:0]           valid_pipeline, last_pipeline;
+  logic [SEED_WIDTH-1:0]             seed_pipeline [0:SIDEBAND_DEPTH];
 
   // Bit-exact 32x32 constant multiply split into 16-bit halves, so each partial
   // product is a single 16x16 DSP with no cascade. See axis_hash_combine_2d for
   // the derivation. Truncating operands is not valid here either: the Laine-Karras
   // scramble relies on the full multiply to propagate entropy across all bits.
   //   x*C = x_lo*C_lo + ((x_lo*C_hi + x_hi*C_lo) << 16)   (mod 2^32)
-  // cmul_pp lands in the existing lk_mul_* register, cmul_sum in the XOR stage
-  // that already follows it, so pipeline latency is unchanged.
   function automatic [63:0] cmul_pp(input [31:0] x, input [31:0] c);
     logic [31:0] p_ll, p_lh, p_hl;
     begin
@@ -78,82 +86,101 @@ module axis_nested_uniform_scramble #
     end
   endfunction
 
-  logic [63:0] lk_mul_1, lk_mul_2, lk_mul_3, lk_mul_4; // packed partial products
+  // ---------------------------------------------------------------------------
+  // Data path. Each Laine-Karras round used to be two register stages:
+  //   (A) lk_mul = cmul_pp(x)                         -- DSP
+  //   (B) x_next = x_delayed ^ cmul_sum(lk_mul)       -- ternary add + XOR
+  // Stage B was the sampler's WNS holder: Vivado retimed the round-boundary
+  // register into the next DSP, exposing the cmul_sum ternary add + XOR + the
+  // DSP operand routing as one path. The split below gives cmul_sum its own
+  // register so the ternary add and the XOR sit in separate cycles, and the XOR
+  // (not the add) feeds the next DSP:
+  //   (A) lk_mul = cmul_pp(x)                         -- DSP
+  //   (B) sum    = cmul_sum(lk_mul)                   -- ternary add only
+  //   (C) x_next = x_delayed ^ sum                    -- XOR only, feeds DSP
+  // +1 cycle per round (4 total); absorbed by growing SIDEBAND_DEPTH above.
+
+  // Front: input reverse + seed add.
+  logic [DATA_WIDTH-1:0] rev_in;      // reverse_bits(x)
+  logic [DATA_WIDTH-1:0] x_add;       // rev_in + seed  (= old data_pipeline[1])
+
+  // Per-round registers. lkN = partial products, sumN = cmul_sum, rN = post-XOR.
+  // xN_da / xN_db carry the round input forward to meet its XOR two cycles later.
+  logic [63:0] lk_1, lk_2, lk_3, lk_4;
+  logic [DATA_WIDTH-1:0] sum_1, sum_2, sum_3, sum_4;
+  logic [DATA_WIDTH-1:0] r1, r2, r3, r4;
+  logic [DATA_WIDTH-1:0] x0_da, x0_db;   // x_add delayed toward round-1 XOR
+  logic [DATA_WIDTH-1:0] r1_da, r1_db;   // r1    delayed toward round-2 XOR
+  logic [DATA_WIDTH-1:0] r2_da, r2_db;   // r2    delayed toward round-3 XOR
+  logic [DATA_WIDTH-1:0] r3_da, r3_db;   // r3    delayed toward round-4 XOR
+
+  // Back: reverse + tail carry to land data at SIDEBAND_DEPTH+4.
+  logic [DATA_WIDTH-1:0] y_rev, yt1, yt2, yt3, yt4;
 
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
-      for (integer i = 0; i <= 10; i = i + 1) begin
-        last_pipeline[i]  <= 1'b0;
-        valid_pipeline[i] <= 1'b0;
-        data_pipeline[i]  <= '0;
-        seed_pipeline[i]  <= '0;
-      end
-      for (integer i = 1; i <= 4; i = i + 1) begin
-        data_pipeline_d[i] <= '0;
-      end
-      lk_mul_1 <= '0;
-      lk_mul_2 <= '0;
-      lk_mul_3 <= '0;
-      lk_mul_4 <= '0;
+      valid_pipeline <= '0;
+      last_pipeline  <= '0;
+      for (integer i = 0; i <= SIDEBAND_DEPTH; i = i + 1) seed_pipeline[i] <= '0;
+      rev_in <= '0; x_add <= '0;
+      lk_1 <= '0; lk_2 <= '0; lk_3 <= '0; lk_4 <= '0;
+      sum_1 <= '0; sum_2 <= '0; sum_3 <= '0; sum_4 <= '0;
+      r1 <= '0; r2 <= '0; r3 <= '0; r4 <= '0;
+      x0_da <= '0; x0_db <= '0;
+      r1_da <= '0; r1_db <= '0;
+      r2_da <= '0; r2_db <= '0;
+      r3_da <= '0; r3_db <= '0;
+      y_rev <= '0; yt1 <= '0; yt2 <= '0; yt3 <= '0; yt4 <= '0;
     end else begin
       if (advance) begin
-        last_pipeline[0]  <= s00_axis_tlast;
+        // --- Sideband delay line ---
         valid_pipeline[0] <= s00_axis_tvalid;
+        last_pipeline[0]  <= s00_axis_tlast;
         seed_pipeline[0]  <= s00_axis_tdata[63:32];
-        data_pipeline[0]  <= reverse_bits(s00_axis_tdata[31:0]);
-
-        for (integer i = 0; i < 10; i = i + 1) begin
-          last_pipeline[i+1]  <= last_pipeline[i];
+        for (integer i = 0; i < SIDEBAND_DEPTH; i = i + 1) begin
           valid_pipeline[i+1] <= valid_pipeline[i];
+          last_pipeline[i+1]  <= last_pipeline[i];
           seed_pipeline[i+1]  <= seed_pipeline[i];
         end
-        
-        // Cycle 1
-        data_pipeline[1]  <= data_pipeline[0] + seed_pipeline[0];
 
-        // Cycle 2
-        lk_mul_1           <= cmul_pp(data_pipeline[1], LK_CONST_1);
-        data_pipeline_d[1] <= data_pipeline[1];
+        // --- Front ---
+        rev_in <= reverse_bits(s00_axis_tdata[31:0]);
+        x_add  <= rev_in + seed_pipeline[0];
 
-        // Cycle 3
-        data_pipeline[2]   <= data_pipeline_d[1] ^ cmul_sum(lk_mul_1);
+        // --- Round 1 (input x_add) ---
+        lk_1  <= cmul_pp(x_add, LK_CONST_1);  x0_da <= x_add;
+        sum_1 <= cmul_sum(lk_1);              x0_db <= x0_da;
+        r1    <= x0_db ^ sum_1;
 
-        // Cycle 4
-        lk_mul_2           <= cmul_pp(data_pipeline[2], LK_CONST_2);
-        data_pipeline_d[2] <= data_pipeline[2];
+        // --- Round 2 (input r1) ---
+        lk_2  <= cmul_pp(r1, LK_CONST_2);     r1_da <= r1;
+        sum_2 <= cmul_sum(lk_2);              r1_db <= r1_da;
+        r2    <= r1_db ^ sum_2;
 
-        // Cycle 5
-        data_pipeline[3]   <= data_pipeline_d[2] ^ cmul_sum(lk_mul_2);
+        // --- Round 3 (input r2) ---
+        lk_3  <= cmul_pp(r2, LK_CONST_3);     r2_da <= r2;
+        sum_3 <= cmul_sum(lk_3);              r2_db <= r2_da;
+        r3    <= r2_db ^ sum_3;
 
-        // Cycle 6
-        lk_mul_3           <= cmul_pp(data_pipeline[3], LK_CONST_3);
-        data_pipeline_d[3] <= data_pipeline[3];
+        // --- Round 4 (input r3) ---
+        lk_4  <= cmul_pp(r3, LK_CONST_4);     r3_da <= r3;
+        sum_4 <= cmul_sum(lk_4);              r3_db <= r3_da;
+        r4    <= r3_db ^ sum_4;
 
-        // Cycle 7
-        data_pipeline[4]   <= data_pipeline_d[3] ^ cmul_sum(lk_mul_3);
-
-        // Cycle 8
-        lk_mul_4           <= cmul_pp(data_pipeline[4], LK_CONST_4);
-        data_pipeline_d[4] <= data_pipeline[4];
-
-        // Cycle 9
-        data_pipeline[5]   <= data_pipeline_d[4] ^ cmul_sum(lk_mul_4);
-
-        // Cycle 10
-        data_pipeline[6]   <= reverse_bits(data_pipeline[5]);
-
-        data_pipeline[7]   <= data_pipeline[6];
-        data_pipeline[8]   <= data_pipeline[7];
-        data_pipeline[9]   <= data_pipeline[8];
-        data_pipeline[10]  <= data_pipeline[9];
+        // --- Back: reverse + tail carry ---
+        y_rev <= reverse_bits(r4);
+        yt1   <= y_rev;
+        yt2   <= yt1;
+        yt3   <= yt2;
+        yt4   <= yt3;
       end
     end
   end
 
   always_comb begin
-    m00_axis_tdata  = {seed_pipeline[10], data_pipeline[10]};
-    m00_axis_tvalid = valid_pipeline[10];
-    m00_axis_tlast  = last_pipeline[10];
+    m00_axis_tdata  = {seed_pipeline[SIDEBAND_DEPTH], yt4};
+    m00_axis_tvalid = valid_pipeline[SIDEBAND_DEPTH];
+    m00_axis_tlast  = last_pipeline[SIDEBAND_DEPTH];
     m00_axis_tstrb  = '1;
   end
 
