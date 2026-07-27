@@ -119,6 +119,19 @@ module axis_ggx_reproject_normalize #
     end
   endfunction
 
+  // Same product, carried at its natural 43-bit Q2.41 instead of zero-inflated to
+  // Q2.62. The old form's low 21 bits were always zero; scale_q241_to_q131 below
+  // re-indexes by -21. Used by the b-section's 18 product registers -- shrinks
+  // those registers and their (congested) nets with zero accuracy change.
+  function automatic logic signed [42:0] mul_pre_q131_q131_to_q241(
+    input logic signed [17:0] a_18,
+    input logic signed [24:0] b_25
+  );
+    begin
+      mul_pre_q131_q131_to_q241 = a_18 * b_25; // Q1.17 * Q1.24 -> Q2.41
+    end
+  endfunction
+
   // Quantized square: truncate the operand to 18b and 25b so the product fits
   // ONE DSP48E1 (auto AREG/MREG/PREG, no fabric cascade). Q1.31 -> Q2.62 with
   // the low bits zero-filled. Both truncations keep the operand's sign, so the
@@ -137,17 +150,18 @@ module axis_ggx_reproject_normalize #
     end
   endfunction
 
-  function automatic logic signed [31:0] scale_q262_to_q131(
-    input logic signed [63:0] prod_q262
+  // Q2.41 product -> Q1.31. Re-indexed by -21 from the old Q2.62 scale: the two
+  // sign/guard bits are [42:41] (were [63:62]), and the [41:10] slice is exactly
+  // the old [62:31]. Only overflow is [42:41]==2'b01 (INT_MIN*INT_MIN -> positive,
+  // clamp to ONE_Q1); negative overflow cannot occur (inputs in [-1,1)).
+  function automatic logic signed [31:0] scale_q241_to_q131(
+    input logic signed [42:0] prod_q241
   );
     begin
-      // Q2.62 product: bits[63:62] are both sign bits; they must agree for no overflow.
-      // Only overflow: [63:62]==2'b01 (INT_MIN*INT_MIN → positive clamp to ONE_Q1).
-      // Negative overflow cannot occur since both inputs are in [-1, 1).
-      if (prod_q262[63:62] == 2'b01)
-        scale_q262_to_q131 = ONE_Q1;
+      if (prod_q241[42:41] == 2'b01)
+        scale_q241_to_q131 = ONE_Q1;
       else
-        scale_q262_to_q131 = $signed(prod_q262[62:31]);
+        scale_q241_to_q131 = $signed(prod_q241[41:10]);
     end
   endfunction
 
@@ -448,14 +462,14 @@ module axis_ggx_reproject_normalize #
   logic signed [24:0] b0p_hz_t1_b, b0p_hz_t2_b, b0p_hz_vh_b;
 
   logic b1a_valid, b1a_last;
-  logic signed [63:0] b1a_hx_t1_q262, b1a_hx_t2_q262, b1a_hx_vh_q262;
-  logic signed [63:0] b1a_hy_t1_q262, b1a_hy_t2_q262, b1a_hy_vh_q262;
-  logic signed [63:0] b1a_hz_t1_q262, b1a_hz_t2_q262, b1a_hz_vh_q262;
+  logic signed [42:0] b1a_hx_t1_q241, b1a_hx_t2_q241, b1a_hx_vh_q241;
+  logic signed [42:0] b1a_hy_t1_q241, b1a_hy_t2_q241, b1a_hy_vh_q241;
+  logic signed [42:0] b1a_hz_t1_q241, b1a_hz_t2_q241, b1a_hz_vh_q241;
 
   logic b1p_valid, b1p_last;
-  logic signed [63:0] b1p_hx_t1_q262, b1p_hx_t2_q262, b1p_hx_vh_q262;
-  logic signed [63:0] b1p_hy_t1_q262, b1p_hy_t2_q262, b1p_hy_vh_q262;
-  logic signed [63:0] b1p_hz_t1_q262, b1p_hz_t2_q262, b1p_hz_vh_q262;
+  logic signed [42:0] b1p_hx_t1_q241, b1p_hx_t2_q241, b1p_hx_vh_q241;
+  logic signed [42:0] b1p_hy_t1_q241, b1p_hy_t2_q241, b1p_hy_vh_q241;
+  logic signed [42:0] b1p_hz_t1_q241, b1p_hz_t2_q241, b1p_hz_vh_q241;
 
   logic b1_valid, b1_last;
   (* keep = "true" *) logic signed [31:0] b1_hx_t1, b1_hx_t2, b1_hx_vh;
@@ -501,25 +515,25 @@ module axis_ggx_reproject_normalize #
   assign sqrt_out_fire = sqrt_out_valid && b0_ready;
   assign sqrt_out_ready = b0_ready;
 
-  wire signed [63:0] b1a_hx_t1_q262_w = mul_pre_q131_q131_to_q262(b0p_hx_t1_a, b0p_hx_t1_b);
-  wire signed [63:0] b1a_hx_t2_q262_w = mul_pre_q131_q131_to_q262(b0p_hx_t2_a, b0p_hx_t2_b);
-  wire signed [63:0] b1a_hx_vh_q262_w = mul_pre_q131_q131_to_q262(b0p_hx_vh_a, b0p_hx_vh_b);
-  wire signed [63:0] b1a_hy_t1_q262_w = mul_pre_q131_q131_to_q262(b0p_hy_t1_a, b0p_hy_t1_b);
-  wire signed [63:0] b1a_hy_t2_q262_w = mul_pre_q131_q131_to_q262(b0p_hy_t2_a, b0p_hy_t2_b);
-  wire signed [63:0] b1a_hy_vh_q262_w = mul_pre_q131_q131_to_q262(b0p_hy_vh_a, b0p_hy_vh_b);
-  wire signed [63:0] b1a_hz_t1_q262_w = mul_pre_q131_q131_to_q262(b0p_hz_t1_a, b0p_hz_t1_b);
-  wire signed [63:0] b1a_hz_t2_q262_w = mul_pre_q131_q131_to_q262(b0p_hz_t2_a, b0p_hz_t2_b);
-  wire signed [63:0] b1a_hz_vh_q262_w = mul_pre_q131_q131_to_q262(b0p_hz_vh_a, b0p_hz_vh_b);
+  wire signed [42:0] b1a_hx_t1_q241_w = mul_pre_q131_q131_to_q241(b0p_hx_t1_a, b0p_hx_t1_b);
+  wire signed [42:0] b1a_hx_t2_q241_w = mul_pre_q131_q131_to_q241(b0p_hx_t2_a, b0p_hx_t2_b);
+  wire signed [42:0] b1a_hx_vh_q241_w = mul_pre_q131_q131_to_q241(b0p_hx_vh_a, b0p_hx_vh_b);
+  wire signed [42:0] b1a_hy_t1_q241_w = mul_pre_q131_q131_to_q241(b0p_hy_t1_a, b0p_hy_t1_b);
+  wire signed [42:0] b1a_hy_t2_q241_w = mul_pre_q131_q131_to_q241(b0p_hy_t2_a, b0p_hy_t2_b);
+  wire signed [42:0] b1a_hy_vh_q241_w = mul_pre_q131_q131_to_q241(b0p_hy_vh_a, b0p_hy_vh_b);
+  wire signed [42:0] b1a_hz_t1_q241_w = mul_pre_q131_q131_to_q241(b0p_hz_t1_a, b0p_hz_t1_b);
+  wire signed [42:0] b1a_hz_t2_q241_w = mul_pre_q131_q131_to_q241(b0p_hz_t2_a, b0p_hz_t2_b);
+  wire signed [42:0] b1a_hz_vh_q241_w = mul_pre_q131_q131_to_q241(b0p_hz_vh_a, b0p_hz_vh_b);
 
-  wire signed [31:0] b1_hx_t1_w = scale_q262_to_q131(b1p_hx_t1_q262);
-  wire signed [31:0] b1_hx_t2_w = scale_q262_to_q131(b1p_hx_t2_q262);
-  wire signed [31:0] b1_hx_vh_w = scale_q262_to_q131(b1p_hx_vh_q262);
-  wire signed [31:0] b1_hy_t1_w = scale_q262_to_q131(b1p_hy_t1_q262);
-  wire signed [31:0] b1_hy_t2_w = scale_q262_to_q131(b1p_hy_t2_q262);
-  wire signed [31:0] b1_hy_vh_w = scale_q262_to_q131(b1p_hy_vh_q262);
-  wire signed [31:0] b1_hz_t1_w = scale_q262_to_q131(b1p_hz_t1_q262);
-  wire signed [31:0] b1_hz_t2_w = scale_q262_to_q131(b1p_hz_t2_q262);
-  wire signed [31:0] b1_hz_vh_w = scale_q262_to_q131(b1p_hz_vh_q262);
+  wire signed [31:0] b1_hx_t1_w = scale_q241_to_q131(b1p_hx_t1_q241);
+  wire signed [31:0] b1_hx_t2_w = scale_q241_to_q131(b1p_hx_t2_q241);
+  wire signed [31:0] b1_hx_vh_w = scale_q241_to_q131(b1p_hx_vh_q241);
+  wire signed [31:0] b1_hy_t1_w = scale_q241_to_q131(b1p_hy_t1_q241);
+  wire signed [31:0] b1_hy_t2_w = scale_q241_to_q131(b1p_hy_t2_q241);
+  wire signed [31:0] b1_hy_vh_w = scale_q241_to_q131(b1p_hy_vh_q241);
+  wire signed [31:0] b1_hz_t1_w = scale_q241_to_q131(b1p_hz_t1_q241);
+  wire signed [31:0] b1_hz_t2_w = scale_q241_to_q131(b1p_hz_t2_q241);
+  wire signed [31:0] b1_hz_vh_w = scale_q241_to_q131(b1p_hz_vh_q241);
 
   wire signed [33:0] b2_hx_sum_w = $signed({b1b_hx_sum[32], b1b_hx_sum}) + $signed({{2{b1b_hx_vh[31]}}, b1b_hx_vh});
   wire signed [33:0] b2_hy_sum_w = $signed({b1b_hy_sum[32], b1b_hy_sum}) + $signed({{2{b1b_hy_vh[31]}}, b1b_hy_vh});
@@ -584,15 +598,15 @@ module axis_ggx_reproject_normalize #
       if (b0p_to_b1a) begin
         b1a_valid <= 1'b1;
         b1a_last <= b0p_last;
-        b1a_hx_t1_q262 <= b1a_hx_t1_q262_w;
-        b1a_hx_t2_q262 <= b1a_hx_t2_q262_w;
-        b1a_hx_vh_q262 <= b1a_hx_vh_q262_w;
-        b1a_hy_t1_q262 <= b1a_hy_t1_q262_w;
-        b1a_hy_t2_q262 <= b1a_hy_t2_q262_w;
-        b1a_hy_vh_q262 <= b1a_hy_vh_q262_w;
-        b1a_hz_t1_q262 <= b1a_hz_t1_q262_w;
-        b1a_hz_t2_q262 <= b1a_hz_t2_q262_w;
-        b1a_hz_vh_q262 <= b1a_hz_vh_q262_w;
+        b1a_hx_t1_q241 <= b1a_hx_t1_q241_w;
+        b1a_hx_t2_q241 <= b1a_hx_t2_q241_w;
+        b1a_hx_vh_q241 <= b1a_hx_vh_q241_w;
+        b1a_hy_t1_q241 <= b1a_hy_t1_q241_w;
+        b1a_hy_t2_q241 <= b1a_hy_t2_q241_w;
+        b1a_hy_vh_q241 <= b1a_hy_vh_q241_w;
+        b1a_hz_t1_q241 <= b1a_hz_t1_q241_w;
+        b1a_hz_t2_q241 <= b1a_hz_t2_q241_w;
+        b1a_hz_vh_q241 <= b1a_hz_vh_q241_w;
       end else if (b1a_to_b1p) begin
         b1a_valid <= 1'b0;
       end
@@ -608,15 +622,15 @@ module axis_ggx_reproject_normalize #
       if (b1a_to_b1p) begin
         b1p_valid <= 1'b1;
         b1p_last <= b1a_last;
-        b1p_hx_t1_q262 <= b1a_hx_t1_q262;
-        b1p_hx_t2_q262 <= b1a_hx_t2_q262;
-        b1p_hx_vh_q262 <= b1a_hx_vh_q262;
-        b1p_hy_t1_q262 <= b1a_hy_t1_q262;
-        b1p_hy_t2_q262 <= b1a_hy_t2_q262;
-        b1p_hy_vh_q262 <= b1a_hy_vh_q262;
-        b1p_hz_t1_q262 <= b1a_hz_t1_q262;
-        b1p_hz_t2_q262 <= b1a_hz_t2_q262;
-        b1p_hz_vh_q262 <= b1a_hz_vh_q262;
+        b1p_hx_t1_q241 <= b1a_hx_t1_q241;
+        b1p_hx_t2_q241 <= b1a_hx_t2_q241;
+        b1p_hx_vh_q241 <= b1a_hx_vh_q241;
+        b1p_hy_t1_q241 <= b1a_hy_t1_q241;
+        b1p_hy_t2_q241 <= b1a_hy_t2_q241;
+        b1p_hy_vh_q241 <= b1a_hy_vh_q241;
+        b1p_hz_t1_q241 <= b1a_hz_t1_q241;
+        b1p_hz_t2_q241 <= b1a_hz_t2_q241;
+        b1p_hz_vh_q241 <= b1a_hz_vh_q241;
       end else if (b1p_to_b1) begin
         b1p_valid <= 1'b0;
       end
