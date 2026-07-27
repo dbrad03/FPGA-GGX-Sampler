@@ -107,36 +107,16 @@ module axis_ggx_event_basis #
 		end
 	endfunction
 
-	// Quantized to a single DSP48E1 (18b x 25b) with round-half-up operands.
-	// Q1.31 x Q1.31 -> Q2.62, low bits zero-filled.
-	function automatic logic signed [63:0] mul_q131_q131_to_q262(
-		input logic signed [31:0] q131_a,
-		input logic signed [31:0] q131_b
-	);
-		logic signed [17:0] a_18;       // Q1.17
-		logic signed [24:0] b_25;       // Q1.24
-		logic signed [42:0] prod_q2_41; // Q2.41
-		begin
-				a_18       = rnd_s18(q131_a);
-				b_25       = rnd_s25(q131_b);
-				prod_q2_41 = a_18 * b_25;                        // Q1.17 * Q1.24 -> Q2.41
-				mul_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;  // Q2.41 -> Q2.62
-		end
-	endfunction
-
-	// Same product, but the operands are ALREADY narrowed and rounded (registered
-	// upstream). The round-half-up increment is a ~7-deep carry chain; when it sits
-	// between an operand register and the DSP it becomes the critical path (WNS
-	// -4.151). Doing the rounding one stage earlier, into a register, leaves only a
-	// clean reg -> DSP path here. Q1.17 x Q1.24 -> Q2.62.
-	function automatic logic signed [63:0] mul_pre_q131_q131_to_q262(
+	// Product carried at its natural 43-bit Q2.41 (was zero-inflated to Q2.62; the
+	// low 21 bits were always zero). Operands are ALREADY narrowed+rounded upstream
+	// (registered), so this is a clean reg -> DSP. Consumers (sat_shift31_q241, the
+	// z2 bit-slices) re-index by -21. Shrinks the t2a / z2 registers + their nets.
+	function automatic logic signed [42:0] mul_pre_q131_q131_to_q241(
 		input logic signed [17:0] a_18,
 		input logic signed [24:0] b_25
 	);
-		logic signed [42:0] prod_q2_41;
 		begin
-				prod_q2_41 = a_18 * b_25;
-				mul_pre_q131_q131_to_q262 = 64'(prod_q2_41) <<< 21;
+			mul_pre_q131_q131_to_q241 = a_18 * b_25; // Q1.17 * Q1.24 -> Q2.41
 		end
 	endfunction
 
@@ -202,6 +182,22 @@ module axis_ggx_event_basis #
         sat_shift31 = r[32] ? NEG_ONE_Q1 : ONE_Q1;
       else
         sat_shift31 = r[31:0];
+    end
+  endfunction
+
+  // Q2.41 (44-bit, one guard bit above Q2.41 so the t2a subtraction can't wrap)
+  // -> Q1.31, saturating. Equivalent to sat_shift31 with indices -21: v>>10 is
+  // the old val64>>31, v[9] the old round bit [30]. Bit-identical to sat_shift31
+  // for every non-overflow value, and saturates correctly at the boundary.
+  localparam logic signed [33:0] Q131_MAX_34 =  34'sd2147483647; //  2^31 - 1
+  localparam logic signed [33:0] Q131_MIN_34 = -34'sd2147483648; // -2^31
+  function automatic logic signed [31:0] sat_shift31_q241(input logic signed [43:0] v);
+    logic signed [33:0] s;
+    begin
+      s = $signed(v[43:10]) + $signed({33'b0, v[9]});
+      if      (s > Q131_MAX_34) sat_shift31_q241 = ONE_Q1;
+      else if (s < Q131_MIN_34) sat_shift31_q241 = NEG_ONE_Q1;
+      else                      sat_shift31_q241 = s[31:0];
     end
   endfunction
 
@@ -303,13 +299,13 @@ module axis_ggx_event_basis #
 	wire s2r_load = norm_out_valid && s2r_ready;
 
 	/// STAGE 2: COMPUTE LENGTH SQAURED (vhx^2 + vhy^2)
-	logic signed [63:0] z2_q262;
+	logic signed [42:0] z2_q241;   // vhz^2, Q2.41 (was Q2.62 with 21 dead low bits)
 	logic [95:0] Vh_20;
 
-	wire [31:0] z2_uq032 = z2_q262[61:30];
+	wire [31:0] z2_uq032 = z2_q241[40:9];   // old [61:30], -21
 	// wire [31:0] lensq = (z2_uq032 >= ONE_Q0) ? 32'b0 : (ONE_Q0 - z2_uq032);
-	wire [31:0] lensq = z2_q262[62] ? 32'b0 : (ONE_Q0 - z2_uq032);
-	wire lensq_condition = lensq < UQ0_32_MIN || z2_q262[62];
+	wire [31:0] lensq = z2_q241[41] ? 32'b0 : (ONE_Q0 - z2_uq032);
+	wire lensq_condition = lensq < UQ0_32_MIN || z2_q241[41];
 
 	// Stage 2b Handshake
 	logic [31:0] lensq_xy_reg;
@@ -356,12 +352,12 @@ module axis_ggx_event_basis #
 		if (s00_axis_aresetn==0) begin
 			s2a_valid <= 1'b0;
 			Vh_20			<= '0;
-			z2_q262 	<= '0;
+			z2_q241 	<= '0;
 		end else begin
 			// STAGE 2 -- square the pre-rounded operand (clean reg -> DSP -> reg)
 			if (s2a_load) begin
 				s2a_valid <= 1'b1;
-				z2_q262 <= mul_pre_q131_q131_to_q262(vhz_r18, vhz_r25);
+				z2_q241 <= mul_pre_q131_q131_to_q241(vhz_r18, vhz_r25);
 				Vh_20		<= Vh_2r;
 			end else if (s2b_advance) begin
 				s2a_valid <= 1'b0; // don't need per se
@@ -380,7 +376,7 @@ module axis_ggx_event_basis #
 			if (stage_2a_ready) begin
 				s2a_valid_reg <= s2b_advance;
 				if (s2b_advance) begin
-					lensq_sub_reg       <= z2_q262[62] ? 32'b0 : (ONE_Q0 - z2_uq032);
+					lensq_sub_reg       <= z2_q241[41] ? 32'b0 : (ONE_Q0 - z2_uq032);
 					lensq_condition_reg <= lensq_condition;
 					Vh_21a_reg          <= Vh_20;
 				end
@@ -548,8 +544,8 @@ module axis_ggx_event_basis #
 	logic s5a_valid, s5b_valid, s5c_valid;
 	logic use_inv_sqrt_50, use_inv_sqrt_5b;
 	logic [95:0] T1_out0, T1_out_5b, T1_out_final;
-	logic signed [63:0] t2a_x, t2a_y, t2a_z0, t2a_z1;
-	logic signed [63:0] t2b_x_r, t2b_y_r, t2b_z_r; // registered pre-sat values
+	logic signed [42:0] t2a_x, t2a_y, t2a_z0, t2a_z1;          // Q2.41 (was Q2.62)
+	logic signed [43:0] t2b_x_r, t2b_y_r, t2b_z_r; // Q2.41 + 1 guard bit (subtraction can't wrap)
 	logic signed [31:0] t2b_x, t2b_y, t2b_z;
 	logic [95:0] Vh_50, Vh_5b, Vh_51;
 	always_ff @(posedge s00_axis_aclk) begin
@@ -572,10 +568,10 @@ module axis_ggx_event_basis #
 				Vh_50 <= Vh_42;
 				use_inv_sqrt_50 <= use_inv_sqrt_42;
 				if (use_inv_sqrt_42) begin
-					t2a_x  <= mul_pre_q131_q131_to_q262(vh42_z_r18, t1c_y_r25);
-					t2a_y  <= mul_pre_q131_q131_to_q262(vh42_z_r18, t1c_x_r25);
-					t2a_z0 <= mul_pre_q131_q131_to_q262(vh42_x_r18, t1c_y_r25);
-					t2a_z1 <= mul_pre_q131_q131_to_q262(vh42_y_r18, t1c_x_r25);
+					t2a_x  <= mul_pre_q131_q131_to_q241(vh42_z_r18, t1c_y_r25);
+					t2a_y  <= mul_pre_q131_q131_to_q241(vh42_z_r18, t1c_x_r25);
+					t2a_z0 <= mul_pre_q131_q131_to_q241(vh42_x_r18, t1c_y_r25);
+					t2a_z1 <= mul_pre_q131_q131_to_q241(vh42_y_r18, t1c_x_r25);
 					T1_out0 <= {32'b0, t1c_y, t1c_x};
 				end else begin
 					T1_out0 <= {32'b0, 32'b0, ONE_Q1};
@@ -589,9 +585,11 @@ module axis_ggx_event_basis #
 				T1_out_5b <= T1_out0;
 				use_inv_sqrt_5b <= use_inv_sqrt_50;
 				if (use_inv_sqrt_50) begin
-					t2b_x_r <= -t2a_x;
-					t2b_y_r <=  t2a_y;
-					t2b_z_r <= t2a_z0 - t2a_z1;
+					// Sign-extend the Q2.41 products to 44 bits before negate/subtract so
+					// the results cannot overflow (t2a_z0 - t2a_z1 can reach the Q2.41 edge).
+					t2b_x_r <= -$signed({t2a_x[42], t2a_x});
+					t2b_y_r <=  $signed({t2a_y[42], t2a_y});
+					t2b_z_r <=  $signed({t2a_z0[42], t2a_z0}) - $signed({t2a_z1[42], t2a_z1});
 				end
 			end
 
@@ -601,9 +599,9 @@ module axis_ggx_event_basis #
 				Vh_51 <= Vh_5b;
 				T1_out_final <= T1_out_5b;
 				if (use_inv_sqrt_5b) begin
-					t2b_x <= sat_shift31(t2b_x_r);
-					t2b_y <= sat_shift31(t2b_y_r);
-					t2b_z <= sat_shift31(t2b_z_r);
+					t2b_x <= sat_shift31_q241(t2b_x_r);
+					t2b_y <= sat_shift31_q241(t2b_y_r);
+					t2b_z <= sat_shift31_q241(t2b_z_r);
 				end else begin
 					t2b_x <= '0;
 					t2b_y <= ONE_Q1;

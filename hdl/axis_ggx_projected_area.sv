@@ -85,18 +85,19 @@ module axis_ggx_projected_area #
     end
   endfunction
 
-  function automatic logic signed [63:0] mul_q131_q131_to_q262(
+  // Q1.23 x Q1.17 -> Q2.40 product, carried at its natural 42-bit width instead
+  // of zero-inflated to Q2.62 (the old <<< 22 low bits were always zero). The one
+  // consumer (the c0_t1_sq square) re-indexes its bit-slices by -22.
+  function automatic logic signed [41:0] mul_q131_q131_to_q240(
     input logic signed [31:0] q131_a,
     input logic signed [31:0] q131_b
   );
     logic signed [23:0] a_24;
     logic signed [17:0] b_18;
-    logic signed [41:0] prod;
     begin
       a_24 = q131_a[31:8];
       b_18 = q131_b[31:14];
-      prod = a_24 * b_18; // Q1.23 * Q1.17 -> Q2.40
-      mul_q131_q131_to_q262 = 64'(prod) <<< 22; // Q2.40 -> Q2.62
+      mul_q131_q131_to_q240 = a_24 * b_18; // Q1.23 * Q1.17 -> Q2.40
     end
   endfunction
 
@@ -215,7 +216,7 @@ module axis_ggx_projected_area #
   // Stage C1: Register t1^2 before the second sqrt.
   logic c0_valid, c0_last;
   logic signed [31:0] c0_t1_q131, c0_t2_q131, c0_vhz_q131;
-  logic signed [63:0] c0_t1_sq_q262;
+  logic signed [41:0] c0_t1_sq_q240;   // t1^2, Q2.40 (was Q2.62 with 22 dead low bits)
 
   wire sqrt_t_in_ready;
   wire c0_to_sqrt2 = c0_valid && sqrt_t_in_ready;
@@ -331,9 +332,9 @@ module axis_ggx_projected_area #
     end
   end
 
-  wire signed [63:0] c0_t1_sq_q262_w = mul_q131_q131_to_q262(s2_t1_q131, s2_t1_q131);
-  wire [31:0] t1_sq_uq032 = c0_t1_sq_q262[61:30];
-  wire [31:0] sqrt_t_arg_uq032 = c0_t1_sq_q262[62] ? 32'd0 : (ONE_UQ0_32 - t1_sq_uq032);
+  wire signed [41:0] c0_t1_sq_q240_w = mul_q131_q131_to_q240(s2_t1_q131, s2_t1_q131);
+  wire [31:0] t1_sq_uq032 = c0_t1_sq_q240[39:8];   // old [61:30], -22
+  wire [31:0] sqrt_t_arg_uq032 = c0_t1_sq_q240[40] ? 32'd0 : (ONE_UQ0_32 - t1_sq_uq032);
 
   wire sqrt_t_out_valid;
   wire [31:0] sqrt_t_out_uq032;
@@ -371,7 +372,7 @@ module axis_ggx_projected_area #
       c0_t1_q131 <= '0;
       c0_t2_q131 <= '0;
       c0_vhz_q131 <= '0;
-      c0_t1_sq_q262 <= '0;
+      c0_t1_sq_q240 <= '0;
     end else begin
       if (s2_to_c0) begin
         c0_valid <= 1'b1;
@@ -379,7 +380,7 @@ module axis_ggx_projected_area #
         c0_t1_q131 <= s2_t1_q131;
         c0_t2_q131 <= s2_t2_q131;
         c0_vhz_q131 <= s2_vhz_q131;
-        c0_t1_sq_q262 <= c0_t1_sq_q262_w;
+        c0_t1_sq_q240 <= c0_t1_sq_q240_w;
       end else if (c0_to_sqrt2) begin
         c0_valid <= 1'b0;
       end
