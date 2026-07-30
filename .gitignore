@@ -1,0 +1,32 @@
+# --- Python ---
+**/__pycache__/
+*.pyc
+.venv/
+
+# --- cocotb / sim build ---
+sim_build/
+sim/sim_build/
+
+# --- Vivado run artifacts (logs, journals, reports, checkpoints) ---
+*.jou
+*.log
+*.out
+*.rpt
+*.dcp
+*.wdb
+*.pb
+*.str
+*.backup.*
+.Xil/
+xsim.dir/
+sim/clockInfo.txt
+
+# --- Generated Vivado project (regenerate with:
+#     vivado -mode batch -source vivado/build_floorplan_project.tcl ) ---
+vivado/ggx_floorplan/
+
+# --- Generated ROM/mem (rebuilt by the cocotb tests' ensure_*_rom helpers) ---
+*.mem
+
+# --- compiled benchmark binary (source bench/benchmark.cpp is tracked) ---
+bench/benchmark
