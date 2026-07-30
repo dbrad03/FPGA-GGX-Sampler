@@ -620,6 +620,7 @@ def ggx_control_runner():
         proj_path / "hdl" / "axis_fixed_sqrt.sv",
         proj_path / "hdl" / "axis_fixed_div.sv",
         proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
+        proj_path / "hdl" / "axis_fixed_inv_sqrt_folded.sv",
         proj_path / "hdl" / "axis_sobol2d_stateless.sv",
         proj_path / "hdl" / "axis_nested_uniform_scramble.sv",
         proj_path / "hdl" / "axis_hash_combine_2d.sv",

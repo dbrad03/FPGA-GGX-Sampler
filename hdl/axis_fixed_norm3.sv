@@ -30,7 +30,13 @@ module axis_fixed_norm3#
   (
     parameter integer C_S00_AXIS_TDATA_WIDTH	= 128,
 		parameter integer C_M00_AXIS_TDATA_WIDTH	= 128,
-		parameter integer FRAC_BITS = 32
+		parameter integer FRAC_BITS = 32,
+		// 0 = pipelined inv_sqrt (throughput, per-sample use e.g. reproject).
+		// 1 = FOLDED sequential inv_sqrt (per-burst use e.g. event_basis): same
+		//     bits, ~75x fewer FFs, no scattered sideband delay lines. The norm3
+		//     handshake is backpressure-safe so the folded engine's busy-stall is
+		//     absorbed; only pick 1 where norm3 runs once per burst.
+		parameter integer FOLD_INVSQRT = 0
 	)
 	(
 		// Ports of Axi Slave Bus Interface S00_AXIS
@@ -271,36 +277,72 @@ module axis_fixed_norm3#
   wire signed [31:0] delayed_y;
   wire signed [31:0] delayed_z;
 
-  axis_fixed_inv_sqrt_nodsp # (
-    .FRAC_BITS(FRAC_BITS),
-    .ADDR_BITS(14)
-  ) u_inv_sqrt (
-    .s00_axis_aclk(s00_axis_aclk),
-    .s00_axis_aresetn(s00_axis_aresetn),
-    .s00_axis_tlast(1'b0),
-    .s00_axis_tvalid(lensq_valid),
-    .s00_axis_tdata(lensq_u32_clamped),
-    .s00_axis_tstrb('1),
-    .s00_axis_tready(inv_in_ready),
+  // Pick the pipelined or folded inv_sqrt (identical ports + bit-identical math).
+  generate
+  if (FOLD_INVSQRT) begin : g_folded_invsqrt
+    axis_fixed_inv_sqrt_folded # (
+      .FRAC_BITS(FRAC_BITS),
+      .ADDR_BITS(14)
+    ) u_inv_sqrt (
+      .s00_axis_aclk(s00_axis_aclk),
+      .s00_axis_aresetn(s00_axis_aresetn),
+      .s00_axis_tlast(1'b0),
+      .s00_axis_tvalid(lensq_valid),
+      .s00_axis_tdata(lensq_u32_clamped),
+      .s00_axis_tstrb('1),
+      .s00_axis_tready(inv_in_ready),
 
-    .s00_axis_user_x(x01),
-    .s00_axis_user_y(y01),
-    .s00_axis_user_z(z01),
-    .s00_axis_user_shift(lensq_shift_reg),
+      .s00_axis_user_x(x01),
+      .s00_axis_user_y(y01),
+      .s00_axis_user_z(z01),
+      .s00_axis_user_shift(lensq_shift_reg),
 
-    .m00_axis_aclk(s00_axis_aclk),
-    .m00_axis_aresetn(s00_axis_aresetn),
-    .m00_axis_tlast(),
-    .m00_axis_tvalid(inv_out_valid),
-    .m00_axis_tdata(inv_len_q7_25),
-    .m00_axis_tstrb(),
-    .m00_axis_tready(pipe_en),
+      .m00_axis_aclk(s00_axis_aclk),
+      .m00_axis_aresetn(s00_axis_aresetn),
+      .m00_axis_tlast(),
+      .m00_axis_tvalid(inv_out_valid),
+      .m00_axis_tdata(inv_len_q7_25),
+      .m00_axis_tstrb(),
+      .m00_axis_tready(pipe_en),
 
-    .m00_axis_user_x(delayed_x),
-    .m00_axis_user_y(delayed_y),
-    .m00_axis_user_z(delayed_z),
-    .m00_axis_user_shift(delayed_shift)
-  );
+      .m00_axis_user_x(delayed_x),
+      .m00_axis_user_y(delayed_y),
+      .m00_axis_user_z(delayed_z),
+      .m00_axis_user_shift(delayed_shift)
+    );
+  end else begin : g_pipe_invsqrt
+    axis_fixed_inv_sqrt_nodsp # (
+      .FRAC_BITS(FRAC_BITS),
+      .ADDR_BITS(14)
+    ) u_inv_sqrt (
+      .s00_axis_aclk(s00_axis_aclk),
+      .s00_axis_aresetn(s00_axis_aresetn),
+      .s00_axis_tlast(1'b0),
+      .s00_axis_tvalid(lensq_valid),
+      .s00_axis_tdata(lensq_u32_clamped),
+      .s00_axis_tstrb('1),
+      .s00_axis_tready(inv_in_ready),
+
+      .s00_axis_user_x(x01),
+      .s00_axis_user_y(y01),
+      .s00_axis_user_z(z01),
+      .s00_axis_user_shift(lensq_shift_reg),
+
+      .m00_axis_aclk(s00_axis_aclk),
+      .m00_axis_aresetn(s00_axis_aresetn),
+      .m00_axis_tlast(),
+      .m00_axis_tvalid(inv_out_valid),
+      .m00_axis_tdata(inv_len_q7_25),
+      .m00_axis_tstrb(),
+      .m00_axis_tready(pipe_en),
+
+      .m00_axis_user_x(delayed_x),
+      .m00_axis_user_y(delayed_y),
+      .m00_axis_user_z(delayed_z),
+      .m00_axis_user_shift(delayed_shift)
+    );
+  end
+  endgenerate
 
   /// FINAL MULTIPLY
   /// (Q1.32 signed * Q7.25 unsigned) -> Q8.56 signed

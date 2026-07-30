@@ -461,6 +461,7 @@ def reproject_normalize_runner():
         proj_path / "hdl" / "axis_fixed_sqrt.sv",
         proj_path / "hdl" / "axis_fixed_div.sv",
         proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
+        proj_path / "hdl" / "axis_fixed_inv_sqrt_folded.sv",
         proj_path / "hdl" / "axis_fixed_norm3.sv",
     ]
 

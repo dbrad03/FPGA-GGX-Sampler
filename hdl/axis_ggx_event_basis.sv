@@ -270,7 +270,9 @@ module axis_ggx_event_basis #
 	wire s2r_ready;
 	wire s2r_to_s2a;
 
-	axis_fixed_norm3 normalize_warped_view (
+	// event_basis is once-per-burst: fold this norm3's inv_sqrt (bit-identical,
+	// removes its scattered sideband delay lines = the biggest route-bound bucket).
+	axis_fixed_norm3 #(.FOLD_INVSQRT(1)) normalize_warped_view (
 		.s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
@@ -412,8 +414,12 @@ module axis_ggx_event_basis #
 	wire [95:0] delayed_Vh = {delayed_Vh_z, delayed_Vh_y, delayed_Vh_x};
 	wire use_inv_sqrt = ~delayed_shift[0];
  
-	/// STAGE 3: 1 / SQRT(LENSQ) w/ axis_fixed_inv_sqrt_nodsp
-	axis_fixed_inv_sqrt_nodsp # (
+	/// STAGE 3: 1 / SQRT(LENSQ). event_basis is once-per-burst, so use the FOLDED
+	/// (sequential) inv_sqrt: bit-identical to the pipelined _nodsp but ~75x fewer
+	/// FFs and no scattered sideband delay lines -- the dominant route-bound
+	/// congestion in this block. The stage-2b handshake (inv_in_ready) is elastic
+	/// (line ~315), so the folded engine's busy-stall backpressures cleanly.
+	axis_fixed_inv_sqrt_folded # (
     .FRAC_BITS(FRAC_BITS),
     .ADDR_BITS(14)
   ) u_inv_sqrt (

@@ -415,8 +415,10 @@ async def test_event_basis(dut):
     outd.append({"type": "read_burst", "duration": len(input_data) + 50}) # Read remainder
 
     # 7. Wait for completion
-    # Wait enough cycles for pipeline latency + pauses
-    await ClockCycles(dut.s00_axis_aclk, 10*N)
+    # The folded (per-burst) inv_sqrt at stage 3 is sequential (~85 cyc/op), so
+    # this back-to-back microbenchmark drains at ~1 basis / 85 cyc. (In the real
+    # system event_basis runs once per N-sample burst, hiding this latency.)
+    await ClockCycles(dut.s00_axis_aclk, 250*N)
 
     # 8. Assertions
     # If sig_out_exp is not empty, it means we missed outputs.
@@ -441,6 +443,7 @@ def event_basis_runner():
                proj_path / "hdl" / "axis_fixed_sqrt.sv",
                proj_path / "hdl" / "axis_fixed_div.sv",
                proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
+               proj_path / "hdl" / "axis_fixed_inv_sqrt_folded.sv",
             ] 
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
