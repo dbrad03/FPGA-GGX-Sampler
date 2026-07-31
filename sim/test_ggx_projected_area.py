@@ -11,6 +11,7 @@ from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -322,11 +323,7 @@ def projected_area_runner():
     rom_path = proj_path / "sim_build" / "ggx_trig_rom.mem"
     ensure_trig_rom(rom_path)
 
-    sources = [
-        proj_path / "hdl" / "axis_ggx_projected_area.sv",
-        proj_path / "hdl" / "axis_fixed_sqrt.sv",
-        proj_path / "hdl" / "axis_trig_lut.sv",
-    ]
+    sources = rtl_sources.sources_for("axis_ggx_projected_area")
 
     runner = get_runner(sim)
     runner.build(

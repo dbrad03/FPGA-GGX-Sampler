@@ -17,6 +17,7 @@ from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
 from cocotb.binary import BinaryValue
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py","")
 proj_path = Path(__file__).resolve().parent.parent
@@ -330,13 +331,7 @@ def dual_sample_runner():
     sim = os.getenv("SIM", "icarus")
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
-    sources = [
-               proj_path / "hdl" / "axis_pre_ggx_sampler.v",
-               proj_path / "hdl" / "axis_top_lvl_sampler.sv",
-               proj_path / "hdl" / "axis_sobol2d_stateless.sv",
-               proj_path / "hdl" / "axis_hash_combine_2d.sv",
-               proj_path / "hdl" / "axis_nested_uniform_scramble.sv"
-            ] 
+    sources = rtl_sources.sources_for("axis_pre_ggx_sampler")
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     sys.path.append(str(proj_path / "sim"))

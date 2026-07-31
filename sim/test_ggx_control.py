@@ -12,6 +12,7 @@ from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -708,25 +709,7 @@ def ggx_control_runner():
     ensure_inv_sqrt_rom(proj_path / "sim" / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
     ensure_trig_rom(proj_path / "sim" / "sim_build" / "ggx_trig_rom.mem")
 
-    sources = [
-        proj_path / "hdl" / "axis_ggx_control.sv",
-        proj_path / "hdl" / "axis_skid_buffer.sv",
-        proj_path / "hdl" / "axis_fifo_2deep.sv",
-        proj_path / "hdl" / "axis_ggx_event_basis.sv",
-        proj_path / "hdl" / "axis_pre_ggx_sampler.v",
-        proj_path / "hdl" / "axis_top_lvl_sampler.sv",
-        proj_path / "hdl" / "axis_ggx_projected_area.sv",
-        proj_path / "hdl" / "axis_ggx_reproject_normalize.sv",
-        proj_path / "hdl" / "axis_fixed_norm3.sv",
-        proj_path / "hdl" / "axis_fixed_sqrt.sv",
-        proj_path / "hdl" / "axis_fixed_div.sv",
-        proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
-        proj_path / "hdl" / "axis_fixed_inv_sqrt_folded.sv",
-        proj_path / "hdl" / "axis_sobol2d_stateless.sv",
-        proj_path / "hdl" / "axis_nested_uniform_scramble.sv",
-        proj_path / "hdl" / "axis_hash_combine_2d.sv",
-        proj_path / "hdl" / "axis_trig_lut.sv",
-    ]
+    sources = rtl_sources.sources_for("axis_ggx_control")
 
     runner = get_runner(sim)
     runner.build(

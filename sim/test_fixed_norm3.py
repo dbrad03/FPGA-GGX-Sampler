@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 from cocotb.utils import get_sim_time as gst
 from cocotb.runner import get_runner
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py","")
 
@@ -116,12 +117,7 @@ def norm_runner():
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
     ensure_rom_exists(proj_path / "sim" / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
-    sources = [
-               proj_path / "hdl" / "axis_fixed_norm3.sv",
-               proj_path / "hdl" / "axis_fixed_sqrt.sv",
-               proj_path / "hdl" / "axis_fixed_div.sv",
-               proj_path / "hdl" / "axis_fixed_inv_sqrt_nodsp.sv",
-            ]
+    sources = rtl_sources.sources_for("axis_fixed_norm3")
 
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     parameters = {}

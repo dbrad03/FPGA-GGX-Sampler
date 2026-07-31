@@ -25,6 +25,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge, ReadOnly
 from cocotb.runner import get_runner
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -154,7 +155,7 @@ async def test_nested_uniform_scramble(dut):
 
 def scramble_runner():
     sim = os.getenv("SIM", "icarus")
-    sources = [proj_path / "hdl" / "axis_nested_uniform_scramble.sv"]
+    sources = rtl_sources.sources_for("axis_nested_uniform_scramble")
     runner = get_runner(sim)
     runner.build(
         sources=sources,

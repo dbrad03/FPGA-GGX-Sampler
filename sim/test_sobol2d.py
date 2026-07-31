@@ -21,6 +21,7 @@ from cocotb_bus.monitors import Monitor
 from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
 import numpy as np
+import rtl_sources
 test_file = os.path.basename(__file__).replace(".py","")
 
 proj_path = Path(__file__).resolve().parent.parent
@@ -259,9 +260,7 @@ def sobol_runner():
     sim = os.getenv("SIM", "icarus")
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
-    sources = [
-               proj_path / "hdl" / "axis_sobol2d_stateless.sv", 
-            ] 
+    sources = rtl_sources.sources_for("axis_sobol2d_stateless")
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     sys.path.append(str(proj_path / "sim"))

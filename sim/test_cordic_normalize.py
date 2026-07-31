@@ -18,6 +18,7 @@ import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge, ReadOnly
 from cocotb.runner import get_runner
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -124,7 +125,7 @@ async def test_cordic_normalize(dut):
 
 def cordic_runner():
     sim = os.getenv("SIM", "icarus")
-    sources = [proj_path / "hdl" / "axis_cordic_normalize.sv"]
+    sources = rtl_sources.sources_for("axis_cordic_normalize")
     runner = get_runner(sim)
     runner.build(
         sources=sources,

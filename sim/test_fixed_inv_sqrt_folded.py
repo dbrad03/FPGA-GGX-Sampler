@@ -16,6 +16,7 @@ except ImportError:
     from cocotb_tools.runner import get_runner
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
+import rtl_sources
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -175,7 +176,7 @@ def inv_sqrt_runner():
     sim = os.getenv("SIM", "icarus")
     sys.path.append(str(proj_path / "sim"))
     sys.path.append(str(proj_path / "hdl"))
-    sources = [proj_path / "hdl" / "axis_fixed_inv_sqrt_folded.sv"]
+    sources = rtl_sources.sources_for("axis_fixed_inv_sqrt_folded")
     runner = get_runner(sim)
     runner.build(
         sources=sources,
