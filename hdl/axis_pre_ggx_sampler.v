@@ -50,24 +50,29 @@ module axis_pre_ggx_sampler #(
     );
 
     // -------------------------------------------------------------------------
-    // 2. Shared Delay Compensation (16 Cycles)
-    // hash pipeline = 18 stages, sobol pipeline = 2 stages => delay = 18-2 = 16
+    // 2. Shared Delay Compensation
+    // The sobol path is shorter than the hash path, so the index waits for the
+    // difference before the scramble consumes both. Both numbers now come from
+    // ggx_latency_pkg, so re-pipelining either block updates this delay instead
+    // of silently mis-pairing index with seed.
+    // See docs/adr/0002-latency-package-is-law.md.
     // -------------------------------------------------------------------------
-    reg [31:0] delay_index [0:15];
-    reg [15:0] delay_valid;
-    reg [15:0] delay_last;
+    localparam integer ALIGN_DELAY = ggx_latency_pkg::sampler_index_align_delay();
+    reg [31:0] delay_index [0:ALIGN_DELAY-1];
+    reg [ALIGN_DELAY-1:0] delay_valid;
+    reg [ALIGN_DELAY-1:0] delay_last;
     integer i;
 
     always @(posedge s00_axis_aclk) begin
         if (!s00_axis_aresetn) begin
-            delay_valid <= 16'b0;
-            delay_last  <= 16'b0;
-            for (i=0; i<16; i=i+1) delay_index[i] <= 32'b0;
+            delay_valid <= {ALIGN_DELAY{1'b0}};
+            delay_last  <= {ALIGN_DELAY{1'b0}};
+            for (i=0; i<ALIGN_DELAY; i=i+1) delay_index[i] <= 32'b0;
         end else if (samp_tready) begin
             delay_index[0] <= {16'b0, samp_tdata[47:32]};
             delay_valid[0] <= samp_tvalid;
             delay_last[0]  <= samp_tlast;
-            for(i=0; i<15; i=i+1) begin
+            for(i=0; i<ALIGN_DELAY-1; i=i+1) begin
                 delay_index[i+1] <= delay_index[i];
                 delay_valid[i+1] <= delay_valid[i];
                 delay_last[i+1]  <= delay_last[i];
@@ -76,9 +81,9 @@ module axis_pre_ggx_sampler #(
     end
 
     wire [63:0] hash_in_data  = samp_tdata;
-    wire [63:0] sobol_in_data = {32'b0, delay_index[15]};
-    wire sobol_in_valid = delay_valid[15];
-    wire sobol_in_last  = delay_last[15];
+    wire [63:0] sobol_in_data = {32'b0, delay_index[ALIGN_DELAY-1]};
+    wire sobol_in_valid = delay_valid[ALIGN_DELAY-1];
+    wire sobol_in_last  = delay_last[ALIGN_DELAY-1];
 
     // -------------------------------------------------------------------------
     // 3. Parallel Paths

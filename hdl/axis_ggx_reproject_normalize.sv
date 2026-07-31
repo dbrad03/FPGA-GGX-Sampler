@@ -29,14 +29,35 @@ module axis_ggx_reproject_normalize #
     output logic [(C_M00_AXIS_TDATA_WIDTH/8)-1:0] m00_axis_tstrb
   );
 
+  // These two are ELASTIC buffers: they need only EXCEED the latency they span
+  // (one entry per beat that can be in flight), unlike the exact-match sideband
+  // delay lines inside the cores. The bound comes from the package; the depth
+  // stays an explicit power-of-two choice with headroom above it.
+  // See docs/adr/0002-latency-package-is-law.md.
+
+  // META0 spans u_sqrt_t3.
+  localparam int META0_MIN_DEPTH =
+      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::SQRT_LATENCY_INST);   // 27
   localparam int META0_DEPTH = 128;
   localparam int META0_AW    = $clog2(META0_DEPTH);
-  // norm3 wraps the no-DSP inverse-sqrt; META1 must be deeper than norm3's
-  // in-flight latency or the TLAST-tracking FIFO overflows (spurious TLAST).
-  // Bumped 128 -> 256: the 2-phase div split grew inv_sqrt_nodsp (~93 -> ~150),
-  // so norm3 is now ~165-cycle latency.
+
+  // META1 spans u_norm_h, which wraps the pipelined inverse-sqrt. If this FIFO
+  // overflows, its TLAST tracking emits a spurious TLAST. It was bumped
+  // 128 -> 256 when the 2-phase div split grew the divider, and 128 genuinely
+  // would not do: norm3's real latency is 151.
+  localparam int META1_MIN_DEPTH =
+      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::NORM3_PIPELINED_LATENCY_INST); // 152
   localparam int META1_DEPTH = 256;
   localparam int META1_AW    = $clog2(META1_DEPTH);
+
+  initial begin
+    if (META0_DEPTH < META0_MIN_DEPTH)
+      $fatal(1, "axis_ggx_reproject_normalize: META0_DEPTH=%0d is below the %0d entries needed to span the sqrt latency of %0d",
+             META0_DEPTH, META0_MIN_DEPTH, ggx_latency_pkg::SQRT_LATENCY_INST);
+    if (META1_DEPTH < META1_MIN_DEPTH)
+      $fatal(1, "axis_ggx_reproject_normalize: META1_DEPTH=%0d is below the %0d entries needed to span the norm3 latency of %0d",
+             META1_DEPTH, META1_MIN_DEPTH, ggx_latency_pkg::NORM3_PIPELINED_LATENCY_INST);
+  end
 
   localparam logic [31:0] ONE_UQ0_32 = 32'hFFFF_FFFF;
   localparam logic signed [31:0] ONE_Q1 = 32'sh7FFF_FFFF;

@@ -70,6 +70,37 @@ package ggx_latency_pkg;
     return HASH_LATENCY - SOBOL_LATENCY;
   endfunction
 
+  // axis_trig_lut: three register stages (s1_valid -> s2_valid -> m00_tvalid).
+  // NOTE 3, not the 2 that projected_area's dead TRIG_LATENCY claimed.
+  localparam int TRIG_LUT_LATENCY = 3;
+
+  //--------------------------------------------------------------------------
+  // Composite blocks
+  //--------------------------------------------------------------------------
+
+  // axis_fixed_norm3 (FOLD_INVSQRT = 0) wraps the pipelined inverse-sqrt in
+  // this many additional register stages (lensq, scaling, output rounding).
+  localparam int NORM3_WRAPPER_STAGES = 9;
+
+  function automatic int norm3_pipelined_latency(input int sqrt_sig_bits,
+                                                 input int div_width,
+                                                 input int div_frac_bits);
+    return inv_sqrt_nodsp_latency(sqrt_sig_bits, div_width, div_frac_bits)
+           + NORM3_WRAPPER_STAGES;
+  endfunction
+
+  //--------------------------------------------------------------------------
+  // Elastic buffers
+  //--------------------------------------------------------------------------
+  // An exact-match sideband delay line must EQUAL the latency it rides
+  // alongside. An elastic FIFO only has to EXCEED it -- one entry per beat that
+  // can be in flight, or its TLAST tracking overflows and emits a spurious
+  // TLAST. Depths themselves stay an explicit design choice (power-of-two ring
+  // buffers with headroom); the package supplies the bound they must clear.
+  function automatic int elastic_min_depth(input int spanned_latency);
+    return spanned_latency + 1;
+  endfunction
+
   //--------------------------------------------------------------------------
   // Parameters the design instantiates its cores with today.
   //--------------------------------------------------------------------------
@@ -85,5 +116,7 @@ package ggx_latency_pkg;
   localparam int INV_SQRT_NODSP_LATENCY_INST =
       inv_sqrt_nodsp_latency(SQRT_SIG_BITS, DIV_WIDTH, DIV_FRAC_BITS);                  // 142
   localparam int SCRAMBLE_LATENCY_INST = scramble_latency(SCRAMBLE_SIDEBAND_DEPTH);     // 19
+  localparam int NORM3_PIPELINED_LATENCY_INST =
+      norm3_pipelined_latency(SQRT_SIG_BITS, DIV_WIDTH, DIV_FRAC_BITS);                 // 151
 
 endpackage

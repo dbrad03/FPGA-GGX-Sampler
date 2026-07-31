@@ -80,8 +80,13 @@ module axis_hash_combine_2d #
     s00_axis_tready = !stall;
   end
 
-	logic [17:0] valid_pipeline;
-	logic [17:0] last_pipeline;
+	// Sideband depth from the package, so this block's latency and every
+	// consumer's view of it are one number. The data path was once one register
+	// shorter than this pipeline, which leaked the next Burst's seed on each
+	// Burst's last beat. See docs/adr/0002-latency-package-is-law.md.
+	localparam int SIDEBAND_DEPTH = ggx_latency_pkg::HASH_LATENCY;
+	logic [SIDEBAND_DEPTH-1:0] valid_pipeline;
+	logic [SIDEBAND_DEPTH-1:0] last_pipeline;
 
 	logic [31:0] first_mix_pipe  [0:4];
 	logic [31:0] second_mix_pipe [0:4];

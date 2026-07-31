@@ -34,10 +34,28 @@ module axis_ggx_projected_area #
   localparam int TRIG_LATENCY = 2;
   localparam int SQRT_DELAY   = SQRT_LATENCY + 1;
   localparam int TRIG_DELAY   = TRIG_LATENCY + 1;
+
+  // ELASTIC buffers: they need only EXCEED the latency they span, unlike the
+  // exact-match sideband delay lines inside the cores. The bound comes from the
+  // package; the depth stays an explicit power-of-two choice with headroom.
+  // See docs/adr/0002-latency-package-is-law.md.
+  localparam int SQRT_META_MIN_DEPTH =
+      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::SQRT_LATENCY_INST);      // 27
+  localparam int TRIG_META_MIN_DEPTH =
+      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::TRIG_LUT_LATENCY);       // 4
   localparam int SQRT_META_DEPTH = 256;
   localparam int TRIG_META_DEPTH = 256;
   localparam int SQRT_META_AW = $clog2(SQRT_META_DEPTH);
   localparam int TRIG_META_AW = $clog2(TRIG_META_DEPTH);
+
+  initial begin
+    if (SQRT_META_DEPTH < SQRT_META_MIN_DEPTH)
+      $fatal(1, "axis_ggx_projected_area: SQRT_META_DEPTH=%0d is below the %0d entries needed to span the sqrt latency of %0d",
+             SQRT_META_DEPTH, SQRT_META_MIN_DEPTH, ggx_latency_pkg::SQRT_LATENCY_INST);
+    if (TRIG_META_DEPTH < TRIG_META_MIN_DEPTH)
+      $fatal(1, "axis_ggx_projected_area: TRIG_META_DEPTH=%0d is below the %0d entries needed to span the trig_lut latency of %0d",
+             TRIG_META_DEPTH, TRIG_META_MIN_DEPTH, ggx_latency_pkg::TRIG_LUT_LATENCY);
+  end
 
   localparam logic [31:0] ONE_UQ0_32 = 32'hFFFF_FFFF;
   localparam logic signed [31:0] ONE_Q1     = 32'sh7FFF_FFFF;

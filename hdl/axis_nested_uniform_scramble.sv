@@ -54,7 +54,9 @@ module axis_nested_uniform_scramble #
   // so the sideband is 19 deep too (indices 0..SIDEBAND_DEPTH). Main's original
   // implementation was aligned as well; an earlier version of this branch
   // shipped a -4 skew here by mistake (caught by test_integration_dual).
-  localparam int SIDEBAND_DEPTH = 18;
+  // From the package, so the depth and every consumer's view of this block's
+  // latency are one number. See docs/adr/0002-latency-package-is-law.md.
+  localparam int SIDEBAND_DEPTH = ggx_latency_pkg::SCRAMBLE_SIDEBAND_DEPTH;
   logic [SIDEBAND_DEPTH:0]           valid_pipeline, last_pipeline;
   logic [SEED_WIDTH-1:0]             seed_pipeline [0:SIDEBAND_DEPTH];
 
