@@ -19,6 +19,16 @@ proj_path = Path(__file__).resolve().parent.parent
 Q31 = 2**31
 # Max tolerated |mean signed error| per component -- see the bias guard below.
 BIAS_TOL = 8e-06
+# Stream-integrity guard -- see the two-gate note in test_ggx_control(). This is
+# NOT an Accuracy tolerance and must never be cited as numerical margin: the
+# reference model behind it is float, not bit-faithful to the datapath, so its
+# own disagreement with the fixed-point pipeline sets the floor here. Measured
+# on a clean run: max deviation 1.871e-03 over 480 Samples. Set ~6.4x above
+# that, which leaves it far below the O(0.1-1) shift that Skew, index
+# mis-pairing or cross-burst leakage produce -- the defects this gate is for.
+# Do NOT reuse the arbitrary 6.5e-2 TOL below for this; it is wide enough to
+# pass substantial real corruption.
+STREAM_TOL = 1.2e-2
 ADDR_BITS = 10
 NORM_X_MIN = 2**-15
 
@@ -344,8 +354,13 @@ def nested_uniform_scramble(x, seed):
     return x
 
 
-def shuffled_scrambled_sobol2d(index, seed, direction_table):
-    index = nested_uniform_scramble(index, seed)
+def scrambled_sobol2d(index, seed, direction_table):
+    # Mirrors the RTL sampler exactly: axis_top_lvl_sampler emits the RAW
+    # sample_idx, axis_sobol2d_stateless consumes it unshuffled, and only the
+    # sobol OUTPUT is scrambled, under hash_combine(seed_base, DIMENSION).
+    # There is deliberately no nested_uniform_scramble on the index -- an
+    # earlier version of this model had one, which is why it disagreed with the
+    # hardware by O(1). test_integration_dual scoreboards this same mapping.
     s0 = sobol_u32_stateless(0, index, direction_table)
     s1 = sobol_u32_stateless(1, index, direction_table)
     u0 = nested_uniform_scramble(s0, hash_combine(seed, 0))
@@ -358,7 +373,7 @@ def control_ref_sequence(seed, burst_len, vx_q, vy_q, vz_q, alpha_q, direction_t
     vhz_q = float_to_q131(vh[2])
     out = []
     for i in range(int(burst_len) + 1):
-        dim0_u1, dim1_u2 = shuffled_scrambled_sobol2d(i, seed, direction_table)
+        dim0_u1, dim1_u2 = scrambled_sobol2d(i, seed, direction_table)
         t1_f, t2_f = projected_ref(vhz_q, dim1_u2, dim0_u1)
         t3 = np.sqrt(max(0.0, 1.0 - t1_f * t1_f - t2_f * t2_f))
         h_unnorm = t1_f * t1_vec + t2_f * t2_vec + t3 * vh
@@ -410,6 +425,30 @@ def make_view(rng):
 
 @cocotb.test()
 async def test_ggx_control(dut):
+    # ------------------------------------------------------------------
+    # This test runs TWO independent gates over one stimulus. Neither is
+    # redundant; do not delete either.
+    #
+    #   Bias gate (expected_math / BIAS_TOL): builds its expected values from
+    #     a monitor tapping the reproject input INSIDE the DUT. That coupling
+    #     is what lets it hold mean_signed < 8e-6 and guard every fixed-point
+    #     narrowing decision -- but it also means it verifies reproject+norm3
+    #     against whatever Sample arrives, never that the arriving Sample
+    #     sequence is right. It is blind to sampler corruption by construction.
+    #
+    #   Stream-integrity gate (stream_expected / STREAM_TOL): a true black box.
+    #     The whole expected Sample sequence is built offline from the Command
+    #     list before the run starts -- no monitor, no DUT signal contributes.
+    #     Its job is the sequence, its index order and its Burst boundaries.
+    #     Skew, index mis-pairing and cross-burst leakage move the output
+    #     half-vector by O(0.1-1), far above the float reference's own error,
+    #     so a loose bound catches them decisively. It is deliberately NOT a
+    #     numerical instrument -- that is the Bias gate's job.
+    #
+    # A sampler Skew regression once kept this file green from end to end. The
+    # stream gate exists so that cannot happen again; the bias gate exists
+    # because the stream gate's float reference can never be that tight.
+    # ------------------------------------------------------------------
     TOL = 6.5e-2
     expected_math = []
     burst_sizes = []
@@ -418,6 +457,9 @@ async def test_ggx_control(dut):
     parser = {"beats": [], "cmd_count": 0}
     out_state = {"cmd_idx": 0, "sample_idx": 0}
     throughput_cycles_cmd0 = []
+    stream_expected = []
+    stream_state = {"idx": 0, "max_dev": 0.0}
+    stream_failures = []
 
     def input_model_cb(transaction):
         data = int(transaction["data"]) & 0xFFFF_FFFF_FFFF_FFFF
@@ -461,6 +503,37 @@ async def test_ggx_control(dut):
                 expected_math.append(norm3_ref_like_rtl(h_unnorm))
 
     def output_check_cb(transaction):
+        # --- Stream-integrity gate ------------------------------------
+        # Runs first and records rather than raises, so that a stream defect
+        # is reported in full at the end of the run instead of aborting on the
+        # first beat -- and so that the Bias gate still gets to render its own
+        # verdict on the same run.
+        si = stream_state["idx"]
+        stream_state["idx"] = si + 1
+        packed_h = unpack_vec96_q131_xyz(int(transaction["data"]) & ((1 << 96) - 1))
+        if si >= len(stream_expected):
+            stream_failures.append(
+                f"STREAM-INTEGRITY GATE: output #{si} is past the end of the expected "
+                f"sequence ({len(stream_expected)} Samples)"
+            )
+        else:
+            ref = stream_expected[si]
+            dev = float(np.max(np.abs(packed_h - ref["h"])))
+            stream_state["max_dev"] = max(stream_state["max_dev"], dev)
+            if dev > STREAM_TOL:
+                stream_failures.append(
+                    f"STREAM-INTEGRITY GATE: cmd={ref['cmd_id']} sample_idx={ref['sample_idx']} "
+                    f"(out#{si}): dev={dev:.6f} > {STREAM_TOL:.1e} "
+                    f"got=({packed_h[0]:+.5f},{packed_h[1]:+.5f},{packed_h[2]:+.5f}) "
+                    f"exp=({ref['h'][0]:+.5f},{ref['h'][1]:+.5f},{ref['h'][2]:+.5f})"
+                )
+            if int(transaction["last"]) != ref["last"]:
+                stream_failures.append(
+                    f"STREAM-INTEGRITY GATE: cmd={ref['cmd_id']} sample_idx={ref['sample_idx']} "
+                    f"(out#{si}): TLAST got={int(transaction['last'])} exp={ref['last']}"
+                )
+
+        # --- Bias gate ------------------------------------------------
         if not expected_math:
             raise AssertionError("Output with empty expected queue")
         if out_state["cmd_idx"] >= len(burst_sizes):
@@ -526,11 +599,17 @@ async def test_ggx_control(dut):
         (191, 0x1020_3040, make_view(rng), 0.62),
         (159, 0xA5A5_55AA, make_view(rng), 0.12),
     ]
-    for burst_len, seed, view, alpha in params:
+    # The stream-integrity gate's oracle: the entire expected Sample sequence,
+    # built here from the Command list alone, before a single beat is driven.
+    dir_table = sobol_direction_numbers_2d()
+    for cmd_id, (burst_len, seed, view, alpha) in enumerate(params):
         vx_q = float_to_q131(view[0])
         vy_q = float_to_q131(view[1])
         vz_q = float_to_q131(view[2])
         alpha_q = float_to_uq032(alpha)
+        stream_expected.extend(
+            control_ref_sequence(seed, burst_len, vx_q, vy_q, vz_q, alpha_q, dir_table, cmd_id)
+        )
         beat0 = ((burst_len & 0xFFFF) << 32) | u32(seed)
         beat1 = (u32(vy_q) << 32) | u32(vx_q)
         beat2 = (u32(alpha_q) << 32) | u32(vz_q)
@@ -557,6 +636,12 @@ async def test_ggx_control(dut):
     await ClockCycles(dut.s00_axis_aclk, 120 * expected_total)
 
     assert len(parser["beats"]) == 0, "Dangling partial command beats at end of test"
+
+    dut._log.info(
+        f"stream-integrity gate: samples={stream_state['idx']}/{len(stream_expected)} "
+        f"max_dev={stream_state['max_dev']:.6f} tol={STREAM_TOL:.1e} "
+        f"mismatches={len(stream_failures)}"
+    )
     # Systematic-bias guard. Truncating fixed-point narrowing biases toward -inf,
     # and unlike random noise that bias does NOT average out under Monte Carlo
     # integration -- it is a permanent error in the sampled distribution. max_err
@@ -566,10 +651,26 @@ async def test_ggx_control(dut):
     n_err = max(stats["n_err"], 1)
     mean_signed = stats["signed_sum"] / n_err
     assert np.all(np.abs(mean_signed) < BIAS_TOL), (
-        f"systematic bias exceeded {BIAS_TOL:.1e}: mean_signed="
+        f"BIAS GATE: systematic bias exceeded {BIAS_TOL:.1e}: mean_signed="
         f"({mean_signed[0]:+.3e},{mean_signed[1]:+.3e},{mean_signed[2]:+.3e}). "
         "A fixed-point width change has likely reintroduced truncation in place of "
         "round-half-up; check the rnd_* helpers and any bare >>> on a product."
+    )
+
+    # --- Stream-integrity gate verdict --------------------------------
+    # Asserted after the Bias gate so that a stream defect leaves the Bias
+    # gate's verdict on the record: the two gates are independent, and which
+    # one fired tells you whether the arithmetic or the Sample stream broke.
+    # A truncated stream must fail here rather than pass vacuously, so every
+    # expected Sample has to have been observed.
+    assert stream_state["idx"] == len(stream_expected), (
+        f"STREAM-INTEGRITY GATE: observed {stream_state['idx']} Samples, expected "
+        f"{len(stream_expected)} -- the output stream is truncated or over-long"
+    )
+    assert not stream_failures, (
+        f"STREAM-INTEGRITY GATE: {len(stream_failures)} mismatch(es) against the "
+        f"independent Command-derived reference (max_dev={stream_state['max_dev']:.6f}, "
+        f"tol={STREAM_TOL:.1e}; first 8 shown):\n  " + "\n  ".join(stream_failures[:8])
     )
 
     assert parser["cmd_count"] == len(cmds), f"expected {len(cmds)} commands, saw {parser['cmd_count']}"
