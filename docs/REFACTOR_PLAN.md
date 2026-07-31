@@ -1,8 +1,9 @@
 # Plan: close one lane at 200 MHz
 
 The single objective of this branch (`refactor-dsp-quantize`). Everything past a closed lane —
-multi-lane expansion, Zybo bring-up, the BVH engine — is out of scope and deliberately unplanned:
-all of it is premised on a 200 MHz Lane existing, and its numbers should be re-derived once one does.
+multi-lane expansion, Zybo bring-up, the BVH engine — is out of scope, and parked in
+[roadmap.md](./roadmap.md). All of it is premised on a 200 MHz Lane existing, and its numbers should
+be re-derived once one does.
 
 Background and the reasoning behind the Q-format, DSP-reduction and fold decisions already landed:
 [handoff.md](./handoff.md). Vocabulary: [CONTEXT.md](../CONTEXT.md).
