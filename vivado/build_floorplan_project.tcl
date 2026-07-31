@@ -6,6 +6,7 @@ set origin /home/darchb/Projects/FPGA-GGX-Sampler
 create_project ggx_floorplan $origin/vivado/ggx_floorplan -part xc7z020clg400-1 -force
 
 add_files -norecurse [list \
+  $origin/hdl/ggx_latency_pkg.sv \
   $origin/hdl/axis_ggx_control.sv \
   $origin/hdl/axis_skid_buffer.sv \
   $origin/hdl/axis_fifo_2deep.sv \

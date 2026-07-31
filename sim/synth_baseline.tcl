@@ -3,6 +3,7 @@ create_project -in_memory -part xc7z020clg400-1
 
 # Source files
 read_verilog -sv {
+  ../hdl/ggx_latency_pkg.sv
   ../hdl/axis_ggx_control.sv
   ../hdl/axis_skid_buffer.sv
   ../hdl/axis_fifo_2deep.sv

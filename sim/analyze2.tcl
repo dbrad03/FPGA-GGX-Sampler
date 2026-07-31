@@ -1,6 +1,7 @@
 # Logic-vs-route classification of the worst paths + phys_opt_design probe.
 create_project -in_memory -part xc7z020clg400-1
 read_verilog -sv {
+  ../hdl/ggx_latency_pkg.sv
   ../hdl/axis_ggx_control.sv ../hdl/axis_skid_buffer.sv ../hdl/axis_fifo_2deep.sv
   ../hdl/axis_ggx_event_basis.sv ../hdl/axis_top_lvl_sampler.sv
   ../hdl/axis_ggx_projected_area.sv ../hdl/axis_ggx_reproject_normalize.sv

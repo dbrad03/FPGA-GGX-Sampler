@@ -15,9 +15,15 @@ from pathlib import Path
 
 HDL_DIR = Path(__file__).resolve().parent.parent / "hdl"
 
+# ggx_latency_pkg leads every list. SystemVerilog packages must be analyzed
+# before the modules that import them, and per docs/adr/0002 this one becomes a
+# dependency of nearly every module. Putting it first unconditionally is why the
+# lists were centralized here rather than prepended to twenty copies by hand.
+LATENCY_PKG = HDL_DIR / "ggx_latency_pkg.sv"
+
 
 def _hdl(*names):
-    return [HDL_DIR / name for name in names]
+    return [LATENCY_PKG] + [HDL_DIR / name for name in names]
 
 
 # Keyed by `hdl_toplevel`. Order is preserved as each runner had it.
