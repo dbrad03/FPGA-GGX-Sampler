@@ -72,9 +72,30 @@ congestion (`normalize_warped_view` = 2184 failing endpoints @ 85% route).
   `test_ggx_reproject_normalize` (unaffected) all green, and **`test_ggx_control` is BYTE-identical to
   the pre-fold baseline** (max|err| 1.8e-5, mean_signed +9.7e-7/−2.8e-6/−1.1e-6). event_basis running
   once per burst hides the folded latency (still 480 outputs).
+  **CAVEAT (2026-07-31):** that byte-identical claim validates the FOLD, not the sampler. The pre-fold
+  baseline itself carried a misaligned sample stream (see "Sampler TDATA/TVALID skew" below), and
+  `test_ggx_control` structurally cannot see it: the test builds its expected values from a monitor
+  tapping the *reproject input inside the DUT*, so it checks reproject+norm3 math against whatever
+  arrives — never that the u1/u2 sequence is correct. `control_ref_sequence` (the true end-to-end model)
+  is defined in the file but **never called**. Only `test_integration_dual` scoreboards the sampler
+  output per-index.
 - **P&R impact (OOC, 5 ns, no phys_opt):** WNS −1.344 → −1.454 (staircase — see below), but
   TNS −1176 → −569 (−52%), failing eps 4069 → 2265 (−44%), CARRY4 2862 → 1772 (−38%), `u_basis`
   26591 cells (6 regions) → 15785 (2 regions, un-smeared). A structural/congestion/area win.
+
+## Sampler TDATA/TVALID skew (found + fixed 2026-07-31)
+The pipeline rewrites left the sideband taps deeper than the data paths, and the *module* tests then
+codified the skew as a "characterised offset" instead of failing on it:
+- **hash**: data 17 regs vs `valid_pipeline[17]` (18) → TDATA led TVALID by 1. Masked mid-burst because
+  the hashed field is `tdata[31:0]` = `seed_base`, a **per-burst constant** — but it leaked the *next*
+  burst's seed on each burst's last beat. Fix: added `final_mix_pipe[5]` (data 18 = valid 18).
+- **scramble**: data 19 regs vs `SIDEBAND_DEPTH+1` = 15 → TDATA lagged TVALID by 4. This one carries
+  real per-sample data, so it **corrupted the stream**: first 4 samples junk, everything shifted,
+  cross-burst leakage. Fix: `SIDEBAND_DEPTH` 14 → 18 (both paths 19).
+- Both `VALID_DATA_OFFSET` constants pinned to **0**. On `main` both blocks were aligned (10/10 and 7/7)
+  — the "offset the system co-tunes around" never existed; it was a regression, not a design property.
+- **Lesson:** a passing `test_ggx_control` is NOT evidence the sampler is correct. Always run
+  `test_integration_dual` in the cascade.
 
 ## What's VERIFIED vs LEFT
 - **Verified:** entire cascade bit-identical after the fold. Accuracy gate held at every step.
@@ -95,8 +116,9 @@ congestion (`normalize_warped_view` = 2184 failing endpoints @ 85% route).
 ## How to measure / verify
 - **Tests** (from `sim/`, `.venv`, cocotb 1.9.2): `python test_<name>.py`. Cascade after any RTL change:
   `test_fixed_sqrt` → `test_fixed_inv_sqrt_nodsp` (and `test_fixed_inv_sqrt_folded`) →
-  `test_ggx_event_basis` → `test_ggx_reproject_normalize` → **`test_ggx_control`** (the byte-identical
-  accuracy+bias gate).
+  `test_ggx_event_basis` → `test_ggx_reproject_normalize` → **`test_integration_dual`** (the ONLY
+  per-index sampler scoreboard — catches stream skew that `test_ggx_control` is blind to) →
+  **`test_ggx_control`** (the accuracy+bias gate; see the caveat above — it is not end-to-end).
 - **Timing** = OOC full place+route only (`sim/phase0_enum.tcl` or `sim/impl_breakdown.tcl`, ~10 min,
   **no phys_opt** — it's ineffective above −0.5 ns here). OOC *synth* timing is badly optimistic on
   this design — always trust post-route. Reports land in `sim/timing_summary_impl.rpt`,

@@ -30,8 +30,8 @@ test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
 
 SEED = 0x1234_5678
-# Characterised offset between this module's TVALID and its own TDATA.
-VALID_DATA_OFFSET = -4
+# TVALID and TDATA are aligned (sideband depth matches the 19-reg data path).
+VALID_DATA_OFFSET = 0
 
 
 def u32(x):
@@ -128,8 +128,8 @@ async def test_nested_uniform_scramble(dut):
     )
     assert best_off == VALID_DATA_OFFSET, (
         f"pipeline alignment changed: outputs now track inputs at offset {best_off:+d}, "
-        f"expected {VALID_DATA_OFFSET:+d}. The system aligns these streams itself, so a "
-        "change here means module latency moved and axis_pre_ggx_sampler needs rechecking."
+        f"expected {VALID_DATA_OFFSET:+d}. TVALID must stay aligned with TDATA: grow or "
+        "shrink SIDEBAND_DEPTH to match the data-path register count."
     )
 
     comparable = [

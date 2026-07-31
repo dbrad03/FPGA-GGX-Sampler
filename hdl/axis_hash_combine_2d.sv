@@ -85,7 +85,7 @@ module axis_hash_combine_2d #
 
 	logic [31:0] first_mix_pipe  [0:4];
 	logic [31:0] second_mix_pipe [0:4];
-	(* keep = "true" *) logic [31:0] final_mix_pipe  [0:4];
+	(* keep = "true" *) logic [31:0] final_mix_pipe  [0:5];
 	logic [31:0] final_mix_pipe_xor2;
 	logic [31:0] final_mix_pipe_xor3;
 
@@ -102,8 +102,8 @@ module axis_hash_combine_2d #
 			for (integer i = 0; i < 5; i = i + 1) begin
 				first_mix_pipe[i]  <= '0;
 				second_mix_pipe[i] <= '0;
-				final_mix_pipe[i]  <= '0;
 			end
+			for (integer i = 0; i < 6; i = i + 1) final_mix_pipe[i] <= '0;
 			final_mix_pipe_xor2 <= '0;
 			final_mix_pipe_xor3 <= '0;
 			first_mix_pipe_m0   <= '0;
@@ -156,12 +156,15 @@ module axis_hash_combine_2d #
 				final_mix_pipe[3]   <= cmul_sum(final_mix_pipe_m3);
 				
 				final_mix_pipe[4]   <= final_mix_pipe[3] ^ (final_mix_pipe[3] >> 16);
+				// Alignment reg: brings the data path to 18 regs, matching the
+				// 18-deep valid/last pipeline (TDATA and TVALID aligned, as on main).
+				final_mix_pipe[5]   <= final_mix_pipe[4];
 			end
 		end
 	end
 
 	always_comb begin
-		m00_axis_tdata 	= {32'b0, final_mix_pipe[4]};
+		m00_axis_tdata 	= {32'b0, final_mix_pipe[5]};
 		m00_axis_tvalid = valid_pipeline[17];
 		m00_axis_tlast 	= last_pipeline[17];
 		m00_axis_tstrb 	= '1;

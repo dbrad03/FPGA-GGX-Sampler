@@ -49,16 +49,12 @@ module axis_nested_uniform_scramble #
   // ---------------------------------------------------------------------------
   // Sideband (valid / last / seed) delay line.
   //
-  // This module deliberately does NOT align its own TVALID with its own TDATA:
-  // the data-math path runs deeper than the sideband path, so the output data
-  // lags the valid/last/seed markers by a fixed VALID_DATA_OFFSET. The sampler
-  // (axis_pre_ggx_sampler) is co-tuned to that offset, so it MUST be preserved.
-  //
-  // Splitting each round's cmul_sum ternary add into its own register (see
-  // below) added 4 cycles to the data path; SIDEBAND_DEPTH grows by the same 4
-  // so the offset is UNCHANGED (still -4) and no system-level retuning is
-  // needed. Data latency = SIDEBAND_DEPTH + 4 cycles.
-  localparam int SIDEBAND_DEPTH = 14;   // was 10 before the cmul_sum split
+  // TVALID/TLAST/seed are ALIGNED with TDATA at the output: the data path below
+  // is 19 registers deep (rev_in, x_add, 4 rounds x {lk, sum, r}, y_rev, yt1-4),
+  // so the sideband is 19 deep too (indices 0..SIDEBAND_DEPTH). Main's original
+  // implementation was aligned as well; an earlier version of this branch
+  // shipped a -4 skew here by mistake (caught by test_integration_dual).
+  localparam int SIDEBAND_DEPTH = 18;
   logic [SIDEBAND_DEPTH:0]           valid_pipeline, last_pipeline;
   logic [SEED_WIDTH-1:0]             seed_pipeline [0:SIDEBAND_DEPTH];
 
@@ -114,7 +110,7 @@ module axis_nested_uniform_scramble #
   logic [DATA_WIDTH-1:0] r2_da, r2_db;   // r2    delayed toward round-3 XOR
   logic [DATA_WIDTH-1:0] r3_da, r3_db;   // r3    delayed toward round-4 XOR
 
-  // Back: reverse + tail carry to land data at SIDEBAND_DEPTH+4.
+  // Back: reverse + tail carry (retiming slack for the placer).
   logic [DATA_WIDTH-1:0] y_rev, yt1, yt2, yt3, yt4;
 
   always_ff @(posedge s00_axis_aclk) begin

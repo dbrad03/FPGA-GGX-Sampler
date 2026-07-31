@@ -11,15 +11,13 @@ The test drives random values plus edge cases chosen to stress the split
 specifically -- the 16-bit boundary, carries out of the low half, and operands
 whose halves are individually zero -- against an independent Python MurmurHash3.
 
-NOTE ON ALIGNMENT: this design does NOT align TVALID with TDATA per module. The
-sampler combines streams at system level (scram0_v = hash0_v && sobol0_v, plus a
-16-deep delay_index on the Sobol path) and the module pipeline depths are
-co-tuned to that, so each module's valid tap is offset from its own data by a
-fixed amount. Retapping a module to "fix" its local alignment breaks the system
-(verified: it fails test_ggx_control). So this test characterises the offset and
-asserts the ARITHMETIC is bit-exact there -- which is what the split-constant
-multiply rewrite needed to prove -- and pins the offset so any latency change is
-caught rather than silently absorbed.
+NOTE ON ALIGNMENT: every module in the sampler chain aligns its own TVALID with
+its own TDATA (as on main). The system-level combining in axis_pre_ggx_sampler
+(scram0_v = hash0_v && sobol0_v, plus the delay_index line on the Sobol path)
+assumes that per-module alignment. This test pins the offset at 0 so any latency
+change that skews data against valid is caught by the module test instead of
+surfacing as a scrambled sample stream downstream (see test_integration_dual,
+which caught exactly that during the DSP-quantize refactor).
 """
 import os
 import random
@@ -35,8 +33,8 @@ proj_path = Path(__file__).resolve().parent.parent
 
 DIMENSION = 0
 LATENCY = 18
-# Characterised offset between this module's TVALID and its own TDATA.
-VALID_DATA_OFFSET = +1
+# TVALID and TDATA are aligned (18-reg data path, 18-deep valid pipeline).
+VALID_DATA_OFFSET = 0
 
 
 def u32(x):
