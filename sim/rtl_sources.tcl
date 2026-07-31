@@ -15,6 +15,15 @@
 
 set _rtl_dir [file normalize [file join [file dirname [info script]] .. hdl]]
 
+# The trig LUT's ROM is gitignored, so a fresh clone or worktree lacks it.
+# Vivado does NOT error on a missing $readmem file -- it warns, leaves the
+# ROM uninitialized and constant-folds the LUT away, then reports timing for
+# a design 12 DSPs lighter than the real one. Fail loudly instead.
+set _trig_rom [file join [file dirname [info script]] ggx_trig_rom.mem]
+if {![file exists $_trig_rom]} {
+  error "missing $_trig_rom -- run: python sim/gen_roms.py"
+}
+
 set RTL_SOURCES(axis_cordic_normalize) [list \
   $_rtl_dir/ggx_latency_pkg.sv \
   $_rtl_dir/axis_cordic_normalize.sv \
