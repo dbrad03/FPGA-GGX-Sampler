@@ -8,7 +8,7 @@ from pathlib import Path
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge, ReadOnly
-import rtl_sources
+from sources import sources_for
 try:
     from cocotb.runner import get_runner
 except ImportError:
@@ -78,7 +78,7 @@ async def sweep(dut):
 
 def main():
     sim = os.getenv("SIM", "icarus")
-    sources = rtl_sources.sources_for("axis_fixed_sqrt")
+    sources = sources_for("axis_fixed_sqrt")
     runner = get_runner(sim)
     runner.build(sources=sources, hdl_toplevel="axis_fixed_sqrt", always=True,
                  build_args=["-Wall", "-I", str(proj_path / "hdl")],

@@ -11,7 +11,7 @@ from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
-import rtl_sources
+from sources import sources_for
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -456,7 +456,7 @@ def reproject_normalize_runner():
     rom_path = proj_path / "sim_build" / "inv_sqrt_rom.mem"
     ensure_inv_sqrt_rom(rom_path, addr_bits=14)
 
-    sources = rtl_sources.sources_for("axis_ggx_reproject_normalize")
+    sources = sources_for("axis_ggx_reproject_normalize")
 
     runner = get_runner(sim)
     runner.build(

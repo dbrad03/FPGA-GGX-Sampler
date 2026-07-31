@@ -17,7 +17,7 @@ from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
 from cocotb.binary import BinaryValue
-import rtl_sources
+from sources import sources_for
 
 test_file = os.path.basename(__file__).replace(".py","")
 proj_path = Path(__file__).resolve().parent.parent
@@ -199,7 +199,7 @@ def inv_sqrt_runner():
     sys.path.append(str(proj_path / "sim"))
     sys.path.append(str(proj_path / "hdl"))
     
-    sources = rtl_sources.sources_for("axis_fixed_inv_sqrt_nodsp")
+    sources = sources_for("axis_fixed_inv_sqrt_nodsp")
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     runner = get_runner(sim)

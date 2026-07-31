@@ -16,7 +16,7 @@ from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
 from cocotb.binary import BinaryValue
-import rtl_sources
+from sources import sources_for
 
 test_file = os.path.basename(__file__).replace(".py","")
 proj_path = Path(__file__).resolve().parent.parent
@@ -438,7 +438,7 @@ def event_basis_runner():
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
     ensure_inv_sqrt_rom(proj_path / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
-    sources = rtl_sources.sources_for("axis_ggx_event_basis")
+    sources = sources_for("axis_ggx_event_basis")
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     sys.path.append(str(proj_path / "sim"))

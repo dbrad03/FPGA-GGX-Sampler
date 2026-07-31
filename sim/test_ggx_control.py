@@ -12,7 +12,7 @@ from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
-import rtl_sources
+from sources import sources_for
 
 test_file = os.path.basename(__file__).replace(".py", "")
 proj_path = Path(__file__).resolve().parent.parent
@@ -709,7 +709,7 @@ def ggx_control_runner():
     ensure_inv_sqrt_rom(proj_path / "sim" / "sim_build" / "inv_sqrt_rom.mem", addr_bits=14)
     ensure_trig_rom(proj_path / "sim" / "sim_build" / "ggx_trig_rom.mem")
 
-    sources = rtl_sources.sources_for("axis_ggx_control")
+    sources = sources_for("axis_ggx_control")
 
     runner = get_runner(sim)
     runner.build(

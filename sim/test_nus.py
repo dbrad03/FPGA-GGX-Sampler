@@ -22,7 +22,7 @@ from cocotb_bus.monitors import Monitor
 from cocotb_bus.monitors import BusMonitor
 from cocotb_bus.scoreboard import Scoreboard
 import numpy as np
-import rtl_sources
+from sources import sources_for
 test_file = os.path.basename(__file__).replace(".py","")
 
 proj_path = Path(__file__).resolve().parent.parent
@@ -228,7 +228,7 @@ def nus_runner():
     sim = os.getenv("SIM", "icarus")
     sys.path.append(str(proj_path / "sim" / "model"))
     sys.path.append(str(proj_path / "hdl" ))
-    sources = rtl_sources.sources_for("axis_nested_uniform_scramble")
+    sources = sources_for("axis_nested_uniform_scramble")
     
     build_test_args = ["-Wall", "-I", str(proj_path / "hdl")]
     sys.path.append(str(proj_path / "sim"))
