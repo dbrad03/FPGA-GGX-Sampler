@@ -30,3 +30,10 @@ vivado/ggx_floorplan/
 
 # --- compiled benchmark binary (source bench/benchmark.cpp is tracked) ---
 bench/benchmark
+
+# --- local agent config (kept out of the public repo) ---
+CLAUDE.md
+AGENTS.md
+CONTEXT.md
+CONTEXT-MAP.md
+docs/agents/
