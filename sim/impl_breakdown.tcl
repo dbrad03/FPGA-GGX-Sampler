@@ -20,7 +20,7 @@ read_verilog -sv {
   ../hdl/axis_hash_combine_2d.sv
   ../hdl/axis_trig_lut.sv
 }
-read_verilog { ../hdl/axis_pre_ggx_sampler.v }
+read_verilog -sv { ../hdl/axis_pre_ggx_sampler.v }
 
 synth_design -top axis_ggx_control -part xc7z020clg400-1 -mode out_of_context
 create_clock -period 5.000 -name clk [get_ports s00_axis_aclk]

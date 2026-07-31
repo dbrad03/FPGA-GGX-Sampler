@@ -127,12 +127,9 @@ package ggx_latency_pkg;
   localparam int SCRAMBLE_SIDEBAND_DEPTH = 18;
 
   // Concrete depths for the instantiations above, for modules that need a
-  // constant rather than a call.
+  // constant rather than a call. Only add one here when a module reads it --
+  // an unread constant in this package is the exact thing it exists to delete.
   localparam int SQRT_LATENCY_INST    = sqrt_latency(SQRT_SIG_BITS);                    // 26
-  localparam int DIV_LATENCY_INST     = div_latency(DIV_WIDTH, DIV_FRAC_BITS);          // 116
-  localparam int INV_SQRT_NODSP_LATENCY_INST =
-      inv_sqrt_nodsp_latency(SQRT_SIG_BITS, DIV_WIDTH, DIV_FRAC_BITS);                  // 142
-  localparam int SCRAMBLE_LATENCY_INST = scramble_latency(SCRAMBLE_SIDEBAND_DEPTH);     // 19
   localparam int NORM3_PIPELINED_LATENCY_INST =
       norm3_pipelined_latency(SQRT_SIG_BITS, DIV_WIDTH, DIV_FRAC_BITS);                 // 151
 

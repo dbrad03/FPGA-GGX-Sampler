@@ -26,6 +26,11 @@ add_files -norecurse [list \
   $origin/hdl/axis_pre_ggx_sampler.v \
   $origin/sim/ggx_trig_rom.mem ]
 
+# axis_pre_ggx_sampler keeps its .v extension but imports ggx_latency_pkg, which
+# is SystemVerilog. Vivado infers Verilog-2001 from the extension and would
+# reject the package scope resolution, so set the language explicitly.
+set_property file_type SystemVerilog [get_files $origin/hdl/axis_pre_ggx_sampler.v]
+
 set_property top axis_ggx_control [current_fileset]
 update_compile_order -fileset sources_1
 

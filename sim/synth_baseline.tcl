@@ -20,7 +20,7 @@ read_verilog -sv {
   ../hdl/axis_hash_combine_2d.sv
   ../hdl/axis_trig_lut.sv
 }
-read_verilog {
+read_verilog -sv {
   ../hdl/axis_pre_ggx_sampler.v
 }
 

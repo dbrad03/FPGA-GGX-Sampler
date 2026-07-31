@@ -55,6 +55,18 @@ module axis_trig_lut #
   logic s2_valid;
   logic [C_M00_AXIS_TDATA_WIDTH-1:0] s2_data; // {cos, sin}
 
+  // Registers a beat passes through: s1 (address), s2 (ROM data), output.
+  // This block's latency is a fixed structural fact rather than a parameter,
+  // so it cannot be sized FROM the package -- but it must still agree WITH it,
+  // or projected_area's elastic buffer is sized against a fiction.
+  // See docs/adr/0002-latency-package-is-law.md.
+  localparam int DATA_PATH_DEPTH = 3;
+  initial begin
+    if (DATA_PATH_DEPTH != ggx_latency_pkg::TRIG_LUT_LATENCY)
+      $fatal(1, "axis_trig_lut: this block is %0d register stages deep but ggx_latency_pkg::TRIG_LUT_LATENCY says %0d.",
+             DATA_PATH_DEPTH, ggx_latency_pkg::TRIG_LUT_LATENCY);
+  end
+
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn==0) begin
       s1_valid <= 0;

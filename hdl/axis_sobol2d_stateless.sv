@@ -58,10 +58,14 @@ module axis_sobol2d_stateless #
     s00_axis_tready = !stall;
   end
 
-	// Pipeline Registers
-	logic [1:0] valid_pipeline;
-	logic [1:0] last_pipeline;
-	logic [SEED_WIDTH-1:0] seed_pipeline [0:1];
+	// Pipeline Registers. Depth comes from the package so that this block's
+	// latency and axis_pre_ggx_sampler's alignment delay are one number --
+	// producers derive too, not just consumers.
+	// See docs/adr/0002-latency-package-is-law.md.
+	localparam int PIPE_DEPTH = ggx_latency_pkg::SOBOL_LATENCY;
+	logic [PIPE_DEPTH-1:0] valid_pipeline;
+	logic [PIPE_DEPTH-1:0] last_pipeline;
+	logic [SEED_WIDTH-1:0] seed_pipeline [0:PIPE_DEPTH-1];
 
 	logic [31:0] partial_sum0, partial_sum1, partial_sum2, partial_sum3;
 	logic [31:0] final_sobol;
@@ -96,8 +100,8 @@ module axis_sobol2d_stateless #
 
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
-			valid_pipeline <= 2'b0;
-			last_pipeline  <= 2'b0;
+			valid_pipeline <= '0;
+			last_pipeline  <= '0;
 			partial_sum0 	 <= '0; partial_sum1 <= '0; 
 			partial_sum2 	 <= '0; partial_sum3 <= '0;
 			final_sobol 	 <= '0;
@@ -122,9 +126,9 @@ module axis_sobol2d_stateless #
 	end
 
 	always_comb begin
-		m00_axis_tdata 	= {seed_pipeline[1], final_sobol};
-		m00_axis_tvalid = valid_pipeline[1];
-		m00_axis_tlast 	= last_pipeline[1];
+		m00_axis_tdata 	= {seed_pipeline[PIPE_DEPTH-1], final_sobol};
+		m00_axis_tvalid = valid_pipeline[PIPE_DEPTH-1];
+		m00_axis_tlast 	= last_pipeline[PIPE_DEPTH-1];
 		m00_axis_tstrb 	= '1;
 	end
 

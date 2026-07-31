@@ -76,7 +76,11 @@ module axis_fixed_inv_sqrt_nodsp #
 
   axis_fixed_sqrt #(
     .FRAC_BITS(32),
-    .SIG_BITS(SQRT_SIG)  // 24 sig bits: sqrt bias ~-3e-8, negligible vs 8e-6 gate; narrows the recurrence add
+    .SIG_BITS(SQRT_SIG),  // 24 sig bits: sqrt bias ~-3e-8, negligible vs 8e-6 gate; narrows the recurrence add
+    // Pinned explicitly rather than left to default to SIG_BITS: sqrt latency
+    // is LAT_STAGES + 2, and delay_sqrt below is sized from SQRT_SIG. If the
+    // two were ever allowed to differ, the sideband would skew silently.
+    .LAT_STAGES(SQRT_SIG)
   ) u_sqrt (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
