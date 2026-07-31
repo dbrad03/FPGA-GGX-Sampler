@@ -32,9 +32,9 @@ vivado/ggx_floorplan/
 bench/benchmark
 
 # --- local agent config (kept out of the public repo) ---
-# NOTE: CONTEXT.md is deliberately NOT ignored -- it is the project's domain
-# glossary, and docs/REFACTOR_PLAN.md + docs/adr/ depend on its vocabulary.
+# NOTE: CONTEXT.md and CONTEXT-MAP.md are deliberately NOT ignored -- they are
+# the project's domain glossary and its index, and docs/REFACTOR_PLAN.md +
+# docs/adr/ depend on that vocabulary.
 CLAUDE.md
 AGENTS.md
-CONTEXT-MAP.md
 docs/agents/
