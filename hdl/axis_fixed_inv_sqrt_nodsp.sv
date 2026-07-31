@@ -130,6 +130,18 @@ module axis_fixed_inv_sqrt_nodsp #
   logic [99:0] delay_sqrt [0:SQRT_DLY-1];
   logic [99:0] delay_div  [0:DIV_DLY];
 
+  // Belt-and-braces. Both sides already come from the package, so this cannot
+  // fire without someone hand-editing a depth back to a literal -- which is
+  // exactly the edit worth catching.
+  initial begin
+    if (SQRT_DLY != ggx_latency_pkg::sqrt_latency(SQRT_SIG))
+      $fatal(1, "axis_fixed_inv_sqrt_nodsp: SKEW -- delay_sqrt holds %0d taps but the sqrt data path is %0d deep.",
+             SQRT_DLY, ggx_latency_pkg::sqrt_latency(SQRT_SIG));
+    if (DIV_DLY + 1 != ggx_latency_pkg::div_latency(DIV_W, DIV_F))
+      $fatal(1, "axis_fixed_inv_sqrt_nodsp: SKEW -- delay_div holds %0d taps but the div data path is %0d deep.",
+             DIV_DLY + 1, ggx_latency_pkg::div_latency(DIV_W, DIV_F));
+  end
+
   always_ff @(posedge s00_axis_aclk) begin
     if (s00_axis_aresetn == 0) begin
       for (int j = 0; j < SQRT_DLY; j = j + 1) begin

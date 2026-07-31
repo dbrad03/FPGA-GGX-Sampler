@@ -88,6 +88,24 @@ module axis_hash_combine_2d #
 	logic [SIDEBAND_DEPTH-1:0] valid_pipeline;
 	logic [SIDEBAND_DEPTH-1:0] last_pipeline;
 
+	// Registers the TDATA path actually passes through, by segment:
+	localparam int DATA_PATH_DEPTH =
+	      1   // tdata_reg
+	    + 7   // block mix:  m0, [0], [1], m2, [2], [3], [4]
+	    + 2   // final mix:  [0], [1]
+	    + 7   // fmix32:     xor2, m2, [2], xor3, m3, [3], [4]
+	    + 1;  // alignment reg [5]
+
+	// Skew guard. TDATA once ran one register SHORT of TVALID here, which leaked
+	// the next Burst's seed on each Burst's last beat and was invisible to
+	// test_ggx_control. Turning that into a build failure is the whole point of
+	// the package. See docs/adr/0002-latency-package-is-law.md.
+	initial begin
+		if (DATA_PATH_DEPTH != SIDEBAND_DEPTH)
+			$fatal(1, "axis_hash_combine_2d: SKEW -- data path is %0d registers deep but the valid/last sideband is %0d. TDATA and TVALID must be aligned.",
+			       DATA_PATH_DEPTH, SIDEBAND_DEPTH);
+	end
+
 	logic [31:0] first_mix_pipe  [0:4];
 	logic [31:0] second_mix_pipe [0:4];
 	(* keep = "true" *) logic [31:0] final_mix_pipe  [0:5];

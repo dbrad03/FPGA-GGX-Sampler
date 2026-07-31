@@ -63,6 +63,15 @@ module axis_pre_ggx_sampler #(
     reg [ALIGN_DELAY-1:0] delay_last;
     integer i;
 
+    // The scramble consumes the hash and sobol paths as one beat, so the delayed
+    // sobol path must land exactly on the hash path -- not near it.
+    initial begin
+        if (ALIGN_DELAY + ggx_latency_pkg::SOBOL_LATENCY != ggx_latency_pkg::HASH_LATENCY)
+            $fatal(1, "axis_pre_ggx_sampler: SKEW -- delayed sobol path is %0d deep (align %0d + sobol %0d) but the hash path is %0d. The scramble would pair an index with the wrong seed.",
+                   ALIGN_DELAY + ggx_latency_pkg::SOBOL_LATENCY, ALIGN_DELAY,
+                   ggx_latency_pkg::SOBOL_LATENCY, ggx_latency_pkg::HASH_LATENCY);
+    end
+
     always @(posedge s00_axis_aclk) begin
         if (!s00_axis_aresetn) begin
             delay_valid <= {ALIGN_DELAY{1'b0}};

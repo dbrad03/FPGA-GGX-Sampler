@@ -30,11 +30,6 @@ module axis_ggx_projected_area #
     output logic [(C_M00_AXIS_TDATA_WIDTH/8)-1:0] m00_axis_tstrb
   );
 
-  localparam int SQRT_LATENCY = 33;
-  localparam int TRIG_LATENCY = 2;
-  localparam int SQRT_DELAY   = SQRT_LATENCY + 1;
-  localparam int TRIG_DELAY   = TRIG_LATENCY + 1;
-
   // ELASTIC buffers: they need only EXCEED the latency they span, unlike the
   // exact-match sideband delay lines inside the cores. The bound comes from the
   // package; the depth stays an explicit power-of-two choice with headroom.

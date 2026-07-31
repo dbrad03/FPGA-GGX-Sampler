@@ -60,6 +60,26 @@ module axis_nested_uniform_scramble #
   logic [SIDEBAND_DEPTH:0]           valid_pipeline, last_pipeline;
   logic [SEED_WIDTH-1:0]             seed_pipeline [0:SIDEBAND_DEPTH];
 
+  // Registers the TDATA path actually passes through, by segment:
+  localparam int LK_ROUNDS        = 4;
+  localparam int STAGES_PER_ROUND = 3;  // lk (partial products), sum, r (XOR)
+  localparam int DATA_PATH_DEPTH  =
+        2                                 // rev_in, x_add
+      + LK_ROUNDS * STAGES_PER_ROUND      // 4 rounds
+      + 1                                 // y_rev
+      + 4;                                // yt1..yt4
+
+  // Skew guard. This block carries real per-Sample data, so when its data path
+  // ran 4 registers BEHIND its sideband the Sample stream was corrupted
+  // outright -- first four Samples junk, everything after shifted, leakage
+  // across Burst boundaries -- and test_ggx_control stayed green throughout.
+  // See docs/adr/0002-latency-package-is-law.md.
+  initial begin
+    if (DATA_PATH_DEPTH != ggx_latency_pkg::scramble_latency(SIDEBAND_DEPTH))
+      $fatal(1, "axis_nested_uniform_scramble: SKEW -- data path is %0d registers deep but the sideband is %0d (SIDEBAND_DEPTH=%0d). TDATA and TVALID must be aligned.",
+             DATA_PATH_DEPTH, ggx_latency_pkg::scramble_latency(SIDEBAND_DEPTH), SIDEBAND_DEPTH);
+  end
+
   // Bit-exact 32x32 constant multiply split into 16-bit halves, so each partial
   // product is a single 16x16 DSP with no cascade. See axis_hash_combine_2d for
   // the derivation. Truncating operands is not valid here either: the Laine-Karras

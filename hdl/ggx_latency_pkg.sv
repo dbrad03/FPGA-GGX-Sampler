@@ -14,10 +14,27 @@
 // that beat's result being presented on the master port. An exact-match
 // sideband delay line must equal it; an elastic FIFO need only exceed it.
 //
-// NOTE: as of this commit NOTHING consumes this package -- that is deliberate
-// (the expand step of an expand/migrate/contract). The values below reproduce
-// the numbers hardcoded across the design today; the migration tickets replace
-// those literals with these calls.
+// DO NOT "simplify" this to consumers-only.
+//
+// It is tempting to look at axis_fixed_sqrt deriving STAGES from a function of
+// its own LAT_STAGES, or axis_fixed_div deriving NST from its own WIDTH and
+// FRAC_BITS, and conclude the round trip through this package is pointless --
+// the core already knows its own depth, so why not let the package just
+// describe it for consumers to read?
+//
+// Because that is precisely the arrangement that failed. A package only
+// consumers read is documentation, and documentation drifted: INVSQRT_LATENCY
+// sat at 150 (self-labelled "informational") while the real figure was 142 and
+// the folded engine it named was a different engine entirely; projected_area's
+// TRIG_LATENCY said 2 for a 3-stage block; reproject's comment put norm3 at
+// "~165" when it is 151. Every one of those was written by someone who knew the
+// right number at the time.
+//
+// When the producer derives from the package too, there is exactly one number
+// and re-parameterizing a core moves its consumers with it. When only consumers
+// derive, there are two numbers that merely happen to agree, and nothing fails
+// when they stop. The elaboration checks in the modules are belt-and-braces on
+// top of this, not a substitute for it.
 //=============================================================================
 package ggx_latency_pkg;
 
