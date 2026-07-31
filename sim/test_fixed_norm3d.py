@@ -311,6 +311,18 @@ async def test_fixed_norm(dut):
         (1e-9, 0.0, 0.0),
         (0.0, -1e-9, 0.0),
     ]
+    # Carried over from the retired test_fixed_norm3, which tested this same
+    # toplevel against a pre-AXIS interface it no longer has. These are its
+    # mid-magnitude and diagonal cases, which the vectors above did not cover.
+    directed += [
+        (0.0, 0.0, 0.25),
+        (0.577, 0.577, 0.577),
+        (-0.5, -0.5, -0.5),
+        (0.1, 0.2, 0.3),
+        (0.4, 0.4, 0.4),
+        (0.6, 0.0, 0.6),
+        (0.15, 0.15, 0.15),
+    ]
     vectors = [(0.006659924518316984, 0.002261493820697069, -0.003101613372564316),
                (0.5,0.0,0.0),(0.0,-0.8,0.0),(0.999,0.999,0.999)]
     for _ in range(N):

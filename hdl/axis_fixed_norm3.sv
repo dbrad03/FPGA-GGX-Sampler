@@ -57,6 +57,33 @@ module axis_fixed_norm3#
   // localparam logic [31:0] LENSQ_MIN_UQ0_32 = 32'h0004_0000; // 1/128^2
   localparam logic [31:0] LENSQ_MIN_UQ0_32 = 32'h0002_0000; // 2**-15
 
+  // Register stages this block adds AROUND whichever inverse-sqrt engine the
+  // FOLD_INVSQRT generate selects, by segment:
+  localparam int PRE_INVSQRT_STAGES  =
+        1   // s00a:      input capture + rnd_s18 operands
+      + 1   // dims_sq:   x^2, y^2, z^2
+      + 1   // sq_0:      x^2 + y^2
+      + 1   // lensq_a:   + z^2
+      + 1;  // lensq:     normalize lensq to UQ0.32 + shift
+  localparam int POST_INVSQRT_STAGES =
+        1   // s3r:       re-register inv_len and the delayed vector
+      + 1   // s3a
+      + 1   // s3b
+      + 1;  // m00_axis:  output register
+  localparam int WRAPPER_STAGES = PRE_INVSQRT_STAGES + POST_INVSQRT_STAGES;
+
+  // reproject sizes its META1 TLAST FIFO from the package's figure for this
+  // block, so that figure has to be this block's, not a number that once
+  // matched. A stage added here without updating the package would leave that
+  // FIFO sized against a fiction -- and stages HAVE been added here before
+  // (see "norm3: add a stage so the normalize multiply feeds DSPs from clean
+  // registers"). See docs/adr/0002-latency-package-is-law.md.
+  initial begin
+    if (WRAPPER_STAGES != ggx_latency_pkg::NORM3_WRAPPER_STAGES)
+      $fatal(1, "axis_fixed_norm3: this block wraps its inverse-sqrt in %0d register stages but ggx_latency_pkg::NORM3_WRAPPER_STAGES says %0d. Update the package (and re-check reproject's META1 depth).",
+             WRAPPER_STAGES, ggx_latency_pkg::NORM3_WRAPPER_STAGES);
+  end
+
   logic pipe_en;
   assign pipe_en = m00_axis_tready || !m00_axis_tvalid;
 
