@@ -47,6 +47,21 @@ module axis_fixed_inv_sqrt_nodsp #
   wire [31:0] x_in = s00_axis_tdata;
   wire [31:0] x_clamped = (x_in < X_MIN_UQ0_32) ? X_MIN_UQ0_32 : x_in;
 
+  // Core parameters and the sideband depths that must match them, from one
+  // source. Both delay lines here are EXACT-MATCH -- they must EQUAL the core
+  // they ride alongside, not merely exceed it (unlike reproject's and
+  // projected_area's elastic FIFOs). Deriving the instantiation parameters and
+  // the depths from the same place is what stops the two drifting apart, which
+  // is the Skew this refactor exists to prevent.
+  // See docs/adr/0002-latency-package-is-law.md.
+  localparam int SQRT_SIG = ggx_latency_pkg::SQRT_SIG_BITS;
+  localparam int DIV_W    = ggx_latency_pkg::DIV_WIDTH;
+  localparam int DIV_F    = ggx_latency_pkg::DIV_FRAC_BITS;
+  // delay_sqrt is declared [0:SQRT_DLY-1], so SQRT_DLY taps == sqrt latency.
+  localparam int SQRT_DLY = ggx_latency_pkg::sqrt_latency(SQRT_SIG);
+  // delay_div is declared [0:DIV_DLY], so it holds DIV_DLY+1 taps == div latency.
+  localparam int DIV_DLY  = ggx_latency_pkg::div_latency(DIV_W, DIV_F) - 1;
+
   // 3. Declarations for pipelined divider
   wire div_in_ready;
   wire div_out_valid;
@@ -61,7 +76,7 @@ module axis_fixed_inv_sqrt_nodsp #
 
   axis_fixed_sqrt #(
     .FRAC_BITS(32),
-    .SIG_BITS(24)   // 24 sig bits: sqrt bias ~-3e-8, negligible vs 8e-6 gate; narrows the recurrence add
+    .SIG_BITS(SQRT_SIG)  // 24 sig bits: sqrt bias ~-3e-8, negligible vs 8e-6 gate; narrows the recurrence add
   ) u_sqrt (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
@@ -87,8 +102,8 @@ module axis_fixed_inv_sqrt_nodsp #
   // Output valid after 57 cycles
 
   axis_fixed_div #(
-    .WIDTH(32),
-    .FRAC_BITS(25)
+    .WIDTH(DIV_W),
+    .FRAC_BITS(DIV_F)
   ) u_div (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
@@ -111,14 +126,7 @@ module axis_fixed_inv_sqrt_nodsp #
   wire sqrt_pipe_en = div_in_ready || !sqrt_out_valid;
   wire div_pipe_en = m00_axis_tready || !div_out_valid;
 
-  // delay_div matches axis_fixed_div's latency: the 2-phase (sub/select) split
-  // doubled div's step count, so its latency went 59 -> 116 cycles (index 0:115).
-  localparam int DIV_DLY = 115;
-  // sqrt latency = SIG_BITS + 2; this exact-match sideband delay line must equal
-  // it (unlike reproject/projected_area's elastic FIFOs, which only need to
-  // exceed the latency). Keep SQRT_SIG in sync with u_sqrt's .SIG_BITS below.
-  localparam int SQRT_SIG = 24;
-  localparam int SQRT_DLY = SQRT_SIG + 2;      // == number of delay taps
+  // (depth localparams are declared above, with the instantiations they size)
   logic [99:0] delay_sqrt [0:SQRT_DLY-1];
   logic [99:0] delay_div  [0:DIV_DLY];
 

@@ -54,16 +54,21 @@ module axis_fixed_inv_sqrt_folded #
   localparam logic [31:0] X_MIN_UQ0_32     = 32'd131072;      // 2^-15 in UQ0.32
   localparam logic [31:0] DIVIDEND_S_UQ0_32 = 32'h4000_0000;  // S = 0.25 in UQ0.32
 
-  // ---- sqrt recurrence params (mirror axis_fixed_sqrt with SIG_BITS=24) ------
-  localparam int SIG_BITS = 24;
+  // ---- sqrt recurrence params (mirror axis_fixed_sqrt) ----------------------
+  // This engine is only bit-identical to the pipelined path while it runs the
+  // SAME recurrences over the SAME widths, so it takes those widths from the
+  // package rather than restating them. A re-parameterization that moved only
+  // one of the two engines would silently break the bit-identical claim.
+  // See docs/adr/0002-latency-package-is-law.md.
+  localparam int SIG_BITS = ggx_latency_pkg::SQRT_SIG_BITS;
   localparam int RAD_W    = 2*SIG_BITS;   // 48
   localparam int ROOT_W   = SIG_BITS;     // 24
   localparam int REM_W    = SIG_BITS + 3; // 27
   localparam int SQRT_ITERS = SIG_BITS;   // 24 active iterations
 
-  // ---- divider recurrence params (mirror axis_fixed_div W=32, FRAC=25) -------
-  localparam int DWIDTH     = 32;
-  localparam int DFRAC      = 25;
+  // ---- divider recurrence params (mirror axis_fixed_div) --------------------
+  localparam int DWIDTH     = ggx_latency_pkg::DIV_WIDTH;
+  localparam int DFRAC      = ggx_latency_pkg::DIV_FRAC_BITS;
   localparam int DIVIDEND_W = DWIDTH + DFRAC; // 57
   localparam int DIV_ITERS  = DWIDTH + DFRAC; // 57
 

@@ -42,7 +42,10 @@ module axis_fixed_div #
   assign m00_axis_tstrb = '1;
 
   localparam int ITERS      = WIDTH + FRAC_BITS; // 57 division steps
-  localparam int NST        = 2 * ITERS;         // two pipeline stages per step
+  // The package defines this core's latency; the core sizes itself to match.
+  // See docs/adr/0002-latency-package-is-law.md.
+  localparam int LATENCY    = ggx_latency_pkg::div_latency(WIDTH, FRAC_BITS);
+  localparam int NST        = LATENCY - 2;       // two pipeline stages per step
   localparam int DIVIDEND_W = WIDTH + FRAC_BITS;
 
   logic [NST:0]          valid;

@@ -67,7 +67,11 @@ module axis_fixed_sqrt #
   assign m00_axis_tlast = 1'b0;
   assign m00_axis_tstrb = '1;
 
-  localparam int STAGES = LAT_STAGES;    // pipeline depth (fixes latency = STAGES+2)
+  // The package defines this core's latency; the core sizes itself to match,
+  // rather than the package documenting a number the core happens to have.
+  // See docs/adr/0002-latency-package-is-law.md.
+  localparam int LATENCY = ggx_latency_pkg::sqrt_latency(LAT_STAGES);
+  localparam int STAGES = LATENCY - 2;   // pipeline depth (latency = STAGES+2)
   localparam int ACTIVE = SIG_BITS;      // number of stages that run the recurrence
   localparam int ROOT_W = SIG_BITS;      // root width == significant bits
   localparam int RAD_W  = 2*SIG_BITS;    // radicand width (2 bits consumed / stage)
