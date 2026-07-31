@@ -1,161 +1,180 @@
-# FPGA GGX Sampler: Refactoring & BVH Integration Plan
+# Plan: close one lane at 200 MHz
 
-This document outlines the step-by-step engineering plan to refactor the GGX VNDF Sampler pipeline, optimize its resource usage, scale it to a multi-lane architecture, port it to the Digilent Zybo Z7-20 board, and prepare it for integration with a hardware BVH ray tracing engine.
+The single objective of this branch (`refactor-dsp-quantize`). Everything past a closed lane —
+multi-lane expansion, Zybo bring-up, the BVH engine — is parked in [roadmap.md](./roadmap.md).
+
+Background and the reasoning behind the Q-format, DSP-reduction and fold decisions already landed:
+[handoff.md](./handoff.md). Vocabulary: [CONTEXT.md](../CONTEXT.md).
+
+## Definition of done
+
+**OOC post-route WNS ≥ 0 at 5 ns on `xc7z020clg400-1`, without `phys_opt`, with the full test cascade
+green.**
+
+Each clause is load-bearing:
+
+- **Post-route, not synth.** OOC synthesis timing is badly optimistic on this design.
+- **No `phys_opt`.** Every measurement on this branch was taken without it, so the closing number stays
+  comparable to the −1.454 we start from. `phys_opt` is also recorded as ineffective above −0.5 ns here.
+- **Full cascade green**, including `test_integration_dual` and the new stream-integrity gate (A).
+- **OOC closure is not in-context closure.** A lane that closes out-of-context has not been shown to
+  close inside a block design with AXI DMA and the PS. That is the next milestone, not part of this one.
+
+## Starting point
+
+WNS −1.454, and two distinct walls:
+
+1. **−1.454, 72% route, per-sample.** `u_skid_proj` FIFO read → `u_reproject_normalize`. reproject is
+   the biggest block in the design (19684 cells) smeared across 4 clock regions.
+2. **−1.235, logic-bound, per-burst.** `u_basis` t2a/t2b band, CARRY4 = 5 from the wide t1b shift.
+   Floorplanning cannot help this one.
+
+## Order of work
+
+**A → B → C → D.** A is first because it is the *instrument*: B and C both justify themselves with
+"bit-identical", and that claim currently rests on a test that structurally cannot see the sampler.
+D is not bit-identical at all, so A is the only correctness evidence it will have.
 
 ---
 
-## 1. System Vision & Target Architecture
+## A. Stream-integrity gate
 
-```mermaid
-graph TD
-    subgraph Host Memory (DDR3)
-        SceneData[BVH & Triangle Database]
-        CmdBuf[Command Buffer]
-        OutBuf[Compressed Samples Buffer]
-    end
+`control_ref_sequence` (`sim/test_ggx_control.py:356`) is a complete end-to-end model — it drives
+sobol → scramble → hash itself from `(seed, index)` — and it is **never called**. Meanwhile
+`test_ggx_control`'s oracle is built by a monitor tapping the reproject input *inside the DUT*, so it
+checks reproject and norm3 math against whatever arrives and never that the u1/u2 sequence is correct.
+A passing `test_ggx_control` is not evidence the sampler works.
 
-    subgraph Zynq PS (Cortex-A9)
-        Driver[Bare-Metal C DMA Driver]
-    end
+**Add, do not replace.** Two gates with two failure modes:
 
-    subgraph Zynq PL (Programmable Logic @ 200 MHz)
-        subgraph AXI Interface
-            AXI_DMA[AXI DMA IP]
-        end
+- **Bias gate** (existing, `reproj_input_model`): stays, because it can only hold `mean_signed < 8e-6`
+  by consuming the DUT's own t1/t2/basis.
+- **Stream-integrity gate** (new, `control_ref_sequence`): true black box, no DUT taps. Its job is to
+  prove the Sample sequence, its index order, and its Burst boundaries — skew, mis-pairing and
+  cross-burst leakage all move `h` by O(0.1–1), far above any float-model error.
 
-        subgraph GGX Sampler (5-Lanes)
-            Control[Shared FSM & Basis Gen]
-            Lane0[Lane 0: quantized math]
-            Lane1[Lane 1: quantized math]
-            Lane2[Lane 2]
-            Lane3[Lane 3]
-            Lane4[Lane 4]
-            OctComp[Octahedral Compression Oct16]
-        end
+Assert on `h` at a tolerance **measured from a clean run and set 5–10× above it** (expected low 1e-3).
+Document it in-line as a stream-integrity guard, **not** an accuracy budget. Do not reuse the existing
+`TOL = 6.5e-2` — it is arbitrary and would pass through large real corruption.
 
-        subgraph Ray Tracing Engine
-            RayGen[Ray Generation]
-            BVH_Trav[BVH Traversal Engine]
-            Tri_Int[Möller-Trumbore Intersection]
-            BRAM_Cache[BVH Node Cache (BRAM)]
-        end
-    end
+**Done when:** the new gate fails if the scramble `SIDEBAND_DEPTH` is perturbed by ±1 (verify by
+temporarily reintroducing the skew), and passes on HEAD.
 
-    %% Connections
-    Driver -->|Configures| AXI_DMA
-    CmdBuf -->|AXI MM2S| AXI_DMA
-    AXI_DMA -->|AXI-Stream| Control
-    Control --> Lane0 & Lane1 & Lane2 & Lane3 & Lane4
-    Lane0 & Lane1 & Lane2 & Lane3 & Lane4 --> OctComp
-    OctComp -->|16-bit compressed| AXI_DMA
-    AXI_DMA -->|AXI S2MM| OutBuf
+---
 
-    SceneData <-->|AXI HP Ports| BVH_Trav
-    BVH_Trav <--> BRAM_Cache
-    BVH_Trav --> Tri_Int
-    OctComp -->|Direct stream| RayGen
-    RayGen --> BVH_Trav
+## B. Latency package
+
+See [ADR-0002](./adr/0002-latency-package-is-law.md). Verified working on Icarus 13.0.
+
+1. Add `hdl/ggx_latency_pkg.sv` — latencies as functions of module parameters.
+2. **Producers derive from it too**, not just consumers. A consumers-only package is documentation,
+   and documentation is what drifted.
+3. Add `initial ... $fatal` depth checks comparing data-path depth against sideband depth as
+   belt-and-braces.
+4. Delete `NORM_LATENCY` (unread) and `INVSQRT_LATENCY` (unread, and wrong for the folded engine) from
+   `axis_ggx_event_basis.sv`.
+5. Centralize the 20 cocotb runner source lists into `sim/sources.py`; patch the 8 Vivado Tcl lists
+   by hand.
+
+**Done when:** full cascade green and `test_ggx_control` output is byte-identical to the pre-B
+baseline. This step changes no arithmetic; if a byte moves, it is a bug.
+
+---
+
+## C. event_basis handshake rebuild
+
+`stage_2a_ready = stage_2b_ready || !s2a_valid_reg` (`axis_ggx_event_basis.sv:324`) — the
+`!s2a_valid_reg` term bypasses `pipe_en`. The stage-2 `always_ff` (line 353) is ungated by `pipe_en`,
+so with `pipe_en=0, s2a_valid=1, s2a_valid_reg=0`: `s2b_advance` asserts, stage 2 clears `s2a_valid`,
+but stage 2a (line 377, `else if (pipe_en)`) never latches it. **The payload is dropped silently.**
+
+**Latent, not live.** `basis_out_ready = (state == ST_WAIT_BASIS)` and
+`basis_in_valid = (state == ST_BASIS_REQ)` (`axis_ggx_control.sv:61,64`) mean exactly one basis item is
+ever in flight and the FSM is parked in `ST_WAIT_BASIS` whenever the output is valid, so `pipe_en` is
+effectively stuck at 1. It is reachable **today** from `test_ggx_event_basis` with backpressure and
+multiple items, and it goes live the moment basis computation overlaps commands — which is on the
+5-lane path. Because only one item is ever in flight, the bypass term also buys **zero throughput**.
+
+Rebuild the stage 2 / 2a / 2b chain on a uniform elastic pattern (`axis_skid_buffer.sv` already
+exists) so correctness is structural rather than argued.
+
+While in here: **rename `s2a`/`s2b`**. The handshake stages and the T2 math stages (`t2a`/`t2b`,
+lines 553–610) are one character apart in the same 630-line file, and the collision has already caused
+confusion. Note that these are *different bands* — this rebuild does not touch the −1.235 critical path.
+
+**Land alone, with its own P&R run.** The width de-inflation experiment was bit-identical yet regressed
+WNS −1.454 → −1.903, and that was only diagnosable because nothing else moved.
+
+**Done when:** cascade green, `test_ggx_control` byte-identical, a directed test drives backpressure
+with multiple items through `test_ggx_event_basis` without loss, and P&R shows no regression.
+
+---
+
+## D. Timing
+
+Ordered by leverage, then by risk. **Re-measure after each step and stop when WNS ≥ 0.**
+
+### D1. Oct32 output encoder — the primary lever
+
+See [ADR-0001](./adr/0001-octahedral-output-deletes-the-per-sample-normalize.md).
+
+Octahedral projection is exactly scale-invariant, so encoding the output makes the per-sample
+L2 normalize **redundant, not merely expensive**. `u_norm_h` (`axis_ggx_reproject_normalize.sv:749`) —
+a ~165-cycle `axis_fixed_norm3` wrapping sqrt plus the 116-stage split divider, and the block holding
+WNS — is **deleted**, replaced by one reciprocal of `|x|+|y|+|z|`.
+
+- Width **Oct32 (2×16b)**, not the Oct16 the old plan named: 8-bit fields quantize to ~0.5–1°, a large
+  fraction of the GGX lobe at α = 0.12.
+- The divide **reuses `axis_fixed_div`** narrowly parameterized (~18–20b quotient). 0 DSP, already
+  verified, already split into SUB+SELECT stages, and its latency now comes from the package built in B.
+- **The bias gate moves to a pre-encoder `h_unnorm` tap.** At 16-bit fields the quantization step
+  swamps 8e-6. The encoder gets its own dedicated unit test against a Python model.
+- Open, and deliberately deferred to implementation because it does not affect closure: how Oct32
+  samples pack into AXIS beats (one 32b sample per beat, or two packed into 64b for DMA efficiency).
+
+**This step is not bit-identical.** The bias gate and the stream-integrity gate from A are its only
+correctness evidence.
+
+### D2. Floorplan — fallback
+
+Only if D1 leaves the per-sample path short. Zero RTL risk; the project is already built and
+synthesized: `vivado/ggx_floorplan/ggx_floorplan.xpr`, see `vivado/FLOORPLAN_GUIDE.md`. Pin reproject
+and its skid into X1Y1+X1Y2 so the FIFO read stops crossing the die. Note D1 may leave a much smaller
+block that no longer needs pinning.
+
+### D3. CORDIC normalize — second fallback
+
+`hdl/axis_cordic_normalize.sv` is written, has a bit-accurate Python reference, and is unintegrated
+(commit `f3a6266`). Largely mooted by D1 for the reproject path — it makes the L2 normalize cheaper,
+where D1 removes the need for it — but it remains available if a normalize survives anywhere on the
+per-sample path.
+
+### D4. t2a/t2b band — independent of D1–D3
+
+The −1.235 logic-bound wall in `u_basis` (CARRY4 = 5 from the wide t1b shift). Untouched by any of the
+above. Either pipeline the band or fold the t2a/t2b math — it is **per-burst**, so latency is nearly
+free and folding is available. Must clear this wall regardless of how the per-sample path closes.
+
+---
+
+## How to measure
+
+**Tests** — from `sim/`, in `.venv`, cocotb 1.9.2: `python test_<name>.py`. Full cascade after any RTL
+change:
+
+```
+test_fixed_sqrt → test_fixed_inv_sqrt_nodsp → test_fixed_inv_sqrt_folded
+  → test_ggx_event_basis → test_ggx_reproject_normalize
+  → test_integration_dual      # per-index sampler scoreboard
+  → test_ggx_control           # bias gate + stream-integrity gate
 ```
 
----
+`test_integration_dual` is not optional. It was, until the new gate in A exists, the only per-index
+sampler scoreboard in the project.
 
-## 2. Phase 1: Single-Lane Optimization & DSP Reduction
+**Timing** — OOC full place-and-route only: `sim/phase0_enum.tcl` or `sim/impl_breakdown.tcl`, ~10 min,
+no `phys_opt`. Reports land in `sim/timing_summary_impl.rpt`, `viol_breakdown.rpt`,
+`phase0_logic_vs_route.rpt`. These and the checkpoints are gitignored — regenerate them.
 
-Before scaling to multiple lanes, we must reduce the DSP footprint of a single sample lane from **104 DSPs** to **< 15 DSPs**. We will do this by lowering the fixed-point precision and replacing multiplier-heavy IP with adder-based alternatives.
-
-### Step 1.1: Precision Quantization (Q1.31 → Q1.23 / UQ0.24)
-*   **Action**: Change the datapath from 32-bit fixed point to 24-bit fixed point.
-*   **Rationale**: A 32-bit multiplication takes 4 DSP slices. A 24-bit multiplication ($24 \le 25, 24 > 18$) takes only **2 DSP slices**, immediately halving math footprint.
-*   **Verification**: Run `sim/test_ggx_control.py` to ensure sampling errors remain below the tolerance threshold ($6.5 \times 10^{-2}$).
-
-### Step 1.2: Digit-Recurrence division & square root (0 DSP, 0 BRAM)
-*   **Action**: Replace the BRAM-LUT and Newton-Raphson-based `axis_fixed_inv_sqrt` and `axis_fixed_sqrt` with pipelined **digit-by-digit (non-restoring) square root and division** cores.
-*   **Rationale**: Digit-recurrence algorithms use a binary-search-like remainder subtraction scheme that requires **only shifts and additions/subtractions**. This drops BRAM and DSP usage for square roots/divisions to zero, trading them for a small number of slice LUTs.
-*   **Verification**: Run `test_fixed_sqrt.py` and `test_fixed_inv_sqrt.py`.
-
-### Step 1.3: CORDIC Conversion (0 DSP)
-*   **Action**: Replace the trigonometric LUT (`axis_trig_lut`) and 3D vector normalizer (`axis_fixed_norm3`) with pipelined **CORDIC (Coordinate Rotation Digital Computer)** engines.
-*   **Rationale**: CORDIC computes vector rotations, sines, cosines, and magnitudes using iterative shift-and-add operations. This eliminates the remaining DSP multipliers used in trig lookups and vector normalization.
-*   **Verification**: Run `test_fixed_norm3.py` and `test_trig_lut.py`.
-
----
-
-## 3. Phase 2: Octahedral Compression (Oct16)
-
-Currently, the output is a 96-bit vector padded to 128-bit per sample. At 1 GHz streaming, this requires **16 GB/s** of memory bandwidth, which is impossible on the Zynq-7020's 4.26 GB/s DDR3 bus.
-
-*   **Action**: Build an octahedral compression module (`axis_octahedral_encode.sv`) that projects the 3D unit vector onto a 2D octahedral surface, producing two 8-bit signed values (16-bit total, Oct16).
-*   **Rationale**: Reduces memory bandwidth from 16 GB/s to **2 GB/s**, enabling the Zynq DDR controller to stream samples to DDR3 without choking.
-*   **Math**:
-    $$p = \frac{v}{\|v\|_1}$$
-    If $z \ge 0$, then $(u,v) = (p_x, p_y)$.
-    If $z < 0$, then $(u,v) = \text{sign}(p_{x,y}) \cdot (1 - |p_{y,x}|)$.
-*   **Verification**: Write a Python verification model in `sim/` to encode/decode vectors and check for spherical reconstruction errors.
-
----
-
-## 4. Phase 3: Multi-Lane Expansion
-
-Once the single-lane is optimized and compressed, we scale to **5 parallel lanes running at 200 MHz** to achieve a **1.0 GHz streaming rate**.
-
-*   **Step 3.1**: Widen the top-level FSM index counter to increment by 5.
-*   **Step 3.2**: Instantiate 5 parallelized sample generator lanes.
-*   **Step 3.3**: Combine outputs into a single wide bus, or run them into a tightly packed FIFO stream.
-
----
-
-## 5. Phase 4: Porting to the Zybo Z7-20
-
-*   **Step 4.1**: Create a Vivado project targeting the `xc7z020clg400-1` part and load the Zybo Z7-20 board presets (to set up the correct PS DDR3 timings and CPU peripherals).
-*   **Step 4.2**: Set up the AXI DMA block design, connecting the PL fabric to the high-performance (AXI HP) ports of the Zynq PS.
-*   **Step 4.3**: Port the host software. Write a bare-metal C application in Vitis using the Xilinx standalone DMA driver (`xaxidma.h`) to initiate transmissions, trigger interrupts, and benchmark throughput.
-
----
-
-## 6. Phase 5: BVH Ray Tracing Engine Integration
-
-To perform real-time rendering, the generated samples will directly feed a **hardware BVH traversal and intersection engine** on the PL.
-
-```
-       [ GGX Sampler ]
-              │ (Oct16)
-              ▼
-    [ Ray Generation Core ] ──(Ray)──► [ BVH Traversal Engine ]
-                                               │         ▲
-                                    (DDR3 / AXI HP)   (BRAM Cache)
-                                               ▼         │
-                                      [ Node/Tri Fetch Core ]
-                                               │
-                                               ▼
-                                  [ Möller-Trumbore Core ]
-                                               │
-                                               ▼
-                                      [ Frame Buffer ]
-```
-
-### Traversal Pipeline
-1.  **Scene Database**: Store the scene BVH tree and triangle vertices in DDR3 memory.
-2.  **PL Traversal FSM**: Traverse the BVH tree by performing ray-box intersection tests on bounding box nodes.
-3.  **BRAM Cache**: Use the remaining BRAM blocks (~500 KB) as a read-only cache for the top levels of the BVH tree to reduce DDR3 latency.
-4.  **Intersection pipeline**: Once a leaf node is hit, stream the triangle data into a pipelined Möller-Trumbore ray-triangle intersection core.
-5.  **Shading**: The hit distance and normals will be fed into a shading block to compute local reflection using the GGX VNDF sample.
-
----
-
-## 7. Resource & Bandwidth Risk Assessment
-
-| Risk | Impact | Mitigation Strategy |
-| :--- | :--- | :--- |
-| **Timing Closure @ 200 MHz** | High | Insert register slices at module boundaries and use carry-save adders. |
-| **DDR3 Bandwidth Contention** | Medium | The BVH engine and GGX Sampler will contend for the DDR3 bus. Use Oct16 compression for samples and keep BVH traversal cached in BRAM. |
-| **BRAM capacity for BVH** | Low | Store only the top 3-4 levels of the BVH tree in BRAM; keep the rest in DDR3. |
-| **Math Precision loss** | Medium | High-precision operations (like basis calculations) will stay 32-bit since they run once per burst, while the high-frequency per-sample path uses 24-bit/16-bit. |
-
----
-
-## Progress notes (as of 2026-07-26)
-
-- **Step 1.1 (quantization)** — captured a stronger way than planned: multiply *operands* truncated to 18b×25b so each product fits **one** DSP (better than the plan's 2-DSP/24b target). Operands are round-half-up (removes a measured systematic bias) and registered so no combinational logic sits between a register and a DSP. The full-*datapath* narrowing (values/products between ops) is still open (see Phase C in the working plan).
-- **Step 1.2 (digit-recurrence sqrt/div)** — `axis_fixed_sqrt` rewritten to non-restoring digit recurrence (0 DSP/0 BRAM); a no-DSP inverse-sqrt (`axis_fixed_inv_sqrt_nodsp`) wraps sqrt+div.
-- **Step 1.3 (CORDIC)** — in progress: replacing `axis_fixed_norm3` and `event_basis`'s inverse-sqrt with a dividerless CORDIC normalize.
-- **Timing**: real post-route (full P&R, not OOC synth) Fmax ~155 MHz; single-lane DSP 85. Remaining 200 MHz gap dominated by the iterative sqrt/div blocks and routing on the wide products.
+**One change per P&R run.** Attribution is the whole reason the width de-inflation regression was
+diagnosable.
