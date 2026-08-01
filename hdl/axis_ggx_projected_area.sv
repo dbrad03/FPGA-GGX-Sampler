@@ -36,8 +36,11 @@ module axis_ggx_projected_area #
   // See docs/adr/0002-latency-package-is-law.md.
   localparam int SQRT_META_MIN_DEPTH =
       ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::SQRT_LATENCY_INST);      // 27
+  // meta1 is pushed at the INPUT of the trig cut FIFO and popped at trig's
+  // output, so it spans the FIFO as well as the core. See issue #31.
   localparam int TRIG_META_MIN_DEPTH =
-      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::TRIG_LUT_LATENCY);       // 4
+      ggx_latency_pkg::elastic_min_depth(
+          ggx_latency_pkg::fifo_2deep_span(ggx_latency_pkg::TRIG_LUT_LATENCY));    // 7
   // meta2 is pushed at the INPUT of the sqrt_t cut FIFO and popped at sqrt_t's
   // output, so it spans the FIFO as well as the core. See issue #31.
   localparam int SQRT_T_META_MIN_DEPTH =
@@ -226,10 +229,14 @@ module axis_ggx_projected_area #
   logic [31:0] s1_r_uq032, s1_u2_uq032;
   logic signed [31:0] s1_vhz_q131;
 
+  // trig's own ready (its pipe_en) terminates at the cut FIFO below, so this
+  // stage stalls against a flip-flop. Without it the chain from the sqrt_t cut
+  // would still reach through BOTH trig and sqrt_r in one cycle. See issue #31.
   wire trig_in_ready;
+  wire trig_fifo_ready;
   wire trig_out_valid;
   wire [63:0] trig_out_data; // {sin, cos}
-  wire s1_to_trig = s1_valid && trig_in_ready;
+  wire s1_to_trig = s1_valid && trig_fifo_ready;
   wire s1_ready = !s1_valid || s1_to_trig;
   assign sqrt_r_out_fire = sqrt_r_out_valid && s1_ready;
   assign sqrt_r_out_ready = s1_ready;
@@ -282,6 +289,27 @@ module axis_ggx_projected_area #
   wire s1b_to_s2 = s1b_valid && s2_ready;
   wire s1b_ready = !s1b_valid || s1b_to_s2;
 
+  // Cut FIFO ahead of trig. meta1 is keyed on s1_to_trig -- the FIFO's INPUT
+  // fire -- so it still counts every beat between here and trig's output, and
+  // TRIG_META_MIN_DEPTH above covers the FIFO's own occupancy.
+  wire        trig_fifo_valid;
+  wire [31:0] trig_fifo_u2_uq032;
+
+  axis_fifo_2deep #(
+    .DATA_WIDTH(32)
+  ) u_trig_fifo (
+    .clk(s00_axis_aclk),
+    .resetn(s00_axis_aresetn),
+    .s_axis_tvalid(s1_valid),
+    .s_axis_tready(trig_fifo_ready),
+    .s_axis_tdata(s1_u2_uq032),
+    .s_axis_tlast(1'b0),
+    .m_axis_tvalid(trig_fifo_valid),
+    .m_axis_tready(trig_in_ready),
+    .m_axis_tdata(trig_fifo_u2_uq032),
+    .m_axis_tlast()
+  );
+
   axis_trig_lut #(
     .C_S00_AXIS_TDATA_WIDTH(64),
     .C_M00_AXIS_TDATA_WIDTH(64),
@@ -291,8 +319,8 @@ module axis_ggx_projected_area #
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
-    .s00_axis_tvalid(s1_valid),
-    .s00_axis_tdata({32'b0, s1_u2_uq032}),
+    .s00_axis_tvalid(trig_fifo_valid),
+    .s00_axis_tdata({32'b0, trig_fifo_u2_uq032}),
     .s00_axis_tstrb('1),
     .s00_axis_tready(trig_in_ready),
 
