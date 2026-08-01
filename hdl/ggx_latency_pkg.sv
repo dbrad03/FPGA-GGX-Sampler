@@ -55,6 +55,30 @@ package ggx_latency_pkg;
     return 2 * (width + frac_bits) + 2;
   endfunction
 
+  // axis_fixed_div with ELASTIC = 0 (RIGID): the recurrence itself is unchanged
+  // -- same ITERS, same SUB/SELECT split, bit-identical quotient -- but it no
+  // longer stalls, so results leave through an output ring on their way to the
+  // output register. That ring costs exactly one cycle.
+  //
+  // Why the rigid variant exists: the stallable one gates all 2*(W+F) stages
+  // with a single pipe_en, and that enable reaches every FF and every SRL in
+  // the core. In oct32's two dividers that was 694 failing endpoints -- 56% of
+  // the design's total -- on paths one logic level deep and 88% route. There is
+  // nothing to pipeline on a path like that; the fix is to not have the enable.
+  // See issue #33 and docs/adr/0003-ready-is-registered-at-core-inputs.md.
+  function automatic int div_latency_rigid(input int width, input int frac_bits);
+    return div_latency(width, frac_bits) + 1;
+  endfunction
+
+  // How deep a rigid core's output ring must be. A rigid pipeline cannot be
+  // told to wait, so when the consumer stalls, everything already inside it
+  // still arrives -- the ring has to have room for all of it, and admission is
+  // capped at the ring's depth so it always does. Rounded up to a power of two
+  // because the ring is a wrapping pointer pair.
+  function automatic int rigid_ring_depth(input int core_latency);
+    return 1 << $clog2(core_latency + 1);
+  endfunction
+
   // axis_fixed_inv_sqrt_nodsp: sqrt feeding div directly, no glue register.
   function automatic int inv_sqrt_nodsp_latency(input int sqrt_sig_bits,
                                                 input int div_width,
@@ -107,8 +131,22 @@ package ggx_latency_pkg;
 
   // axis_oct32_encode: 4 stages in (magnitudes, L1 sum, shift amount, shift),
   // the divide, and 1 output register. Replaces norm3 on the per-sample path.
+  // Its two dividers are RIGID (issue #33), so the middle term is the rigid
+  // figure -- one cycle deeper than the stallable one.
   function automatic int oct32_encode_latency(input int div_width, input int div_frac_bits);
-    return 4 + div_latency(div_width, div_frac_bits) + 1;
+    return 4 + div_latency_rigid(div_width, div_frac_bits) + 1;
+  endfunction
+
+  // How many beats an oct32 encoder can hold AT ONCE, which is not its latency.
+  // Its dividers are rigid: they cannot be stalled, so under backpressure the
+  // results pile up in their output rings instead. A sideband riding alongside
+  // the whole encoder has to clear the CAPACITY, or it wraps while the encoder
+  // is merely full -- and a sideband that wraps emits a spurious TLAST.
+  // Deliberately an over-estimate: latency counts the pipeline, the ring term
+  // counts what can queue behind it.
+  function automatic int oct32_encode_capacity(input int div_width, input int div_frac_bits);
+    return oct32_encode_latency(div_width, div_frac_bits)
+         + rigid_ring_depth(div_latency_rigid(div_width, div_frac_bits));
   endfunction
 
   localparam int OCT32_DIV_WIDTH = 20;

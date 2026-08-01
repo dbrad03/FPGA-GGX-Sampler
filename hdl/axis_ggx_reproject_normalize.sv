@@ -42,12 +42,21 @@ module axis_ggx_reproject_normalize #
   localparam int META0_AW    = $clog2(META0_DEPTH);
 
   // META1 spans the output block. That used to be norm3 (151 cycles); it is now
-  // the Oct32 encoder (82). If this FIFO overflows, its TLAST tracking emits a
+  // the Oct32 encoder. If this FIFO overflows, its TLAST tracking emits a
   // spurious TLAST. The depth is left at 256 -- it is a power-of-two ring
   // buffer with headroom either way, and shrinking it is an area decision for
   // the multi-Lane bin-pack, not part of deleting the normalize.
+  //
+  // The bound is the encoder's CAPACITY, not its latency (issue #33). Its
+  // dividers went rigid, so beats now queue in their output rings under
+  // backpressure instead of stalling in place: 84 cycles of pipeline, but up to
+  // 212 beats resident. Sizing this against the latency would have left it
+  // bounded against a fiction -- exactly what ADR-0002 exists to prevent, and
+  // it would have held right up until something downstream backpressured hard.
   localparam int META1_MIN_DEPTH =
-      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::OCT32_ENCODE_LATENCY_INST);    // 83
+      ggx_latency_pkg::elastic_min_depth(
+          ggx_latency_pkg::oct32_encode_capacity(ggx_latency_pkg::OCT32_DIV_WIDTH,
+                                                 ggx_latency_pkg::OCT32_DIV_FRAC)); // 213
   localparam int META1_DEPTH = 256;
   localparam int META1_AW    = $clog2(META1_DEPTH);
 
@@ -56,7 +65,7 @@ module axis_ggx_reproject_normalize #
       $fatal(1, "axis_ggx_reproject_normalize: META0_DEPTH=%0d is below the %0d entries needed to span the sqrt latency of %0d",
              META0_DEPTH, META0_MIN_DEPTH, ggx_latency_pkg::SQRT_LATENCY_INST);
     if (META1_DEPTH < META1_MIN_DEPTH)
-      $fatal(1, "axis_ggx_reproject_normalize: META1_DEPTH=%0d is below the %0d entries needed to span the Oct32 encoder latency of %0d",
+      $fatal(1, "axis_ggx_reproject_normalize: META1_DEPTH=%0d is below the %0d entries needed to span the Oct32 encoder's capacity (its latency is %0d, but its rigid dividers queue behind it)",
              META1_DEPTH, META1_MIN_DEPTH, ggx_latency_pkg::OCT32_ENCODE_LATENCY_INST);
   end
 

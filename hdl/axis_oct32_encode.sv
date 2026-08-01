@@ -61,9 +61,11 @@ module axis_oct32_encode #
   // agree -- exactly what ADR-0002 forbids.
   localparam int DIV_W = ggx_latency_pkg::OCT32_DIV_WIDTH;
   localparam int DIV_F = ggx_latency_pkg::OCT32_DIV_FRAC;
-  // Latency comes from the package, so this block's sideband delay line cannot
-  // drift from the divider it rides alongside. See ADR-0002.
-  localparam int DIV_LAT = ggx_latency_pkg::div_latency(DIV_W, DIV_F);
+  // Latency comes from the package, so this block cannot drift from the divider
+  // it rides alongside. See ADR-0002. Both dividers are RIGID (ELASTIC=0,
+  // issue #33): they carry no clock enable, which is what removed 694 failing
+  // endpoints from this block, and they are one cycle deeper as a result.
+  localparam int DIV_LAT = ggx_latency_pkg::div_latency_rigid(DIV_W, DIV_F);
 
   // L1 can reach 3*2^31, so it needs 34 bits.
   localparam int L1_W = 34;
@@ -240,7 +242,7 @@ module axis_oct32_encode #
   wire [DIV_W-1:0] qx_raw, qy_raw;
   wire div_x_out_valid, div_y_out_valid;
 
-  axis_fixed_div #(.WIDTH(DIV_W), .FRAC_BITS(DIV_F)) u_div_x (
+  axis_fixed_div #(.WIDTH(DIV_W), .FRAC_BITS(DIV_F), .ELASTIC(0)) u_div_x (
     .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0), .s00_axis_tvalid(s2_valid),
     .s00_axis_tdata({s2_ax, s2_d}), .s00_axis_tstrb('1),
@@ -250,7 +252,7 @@ module axis_oct32_encode #
     .m00_axis_tlast(), .m00_axis_tdata(qx_raw), .m00_axis_tstrb()
   );
 
-  axis_fixed_div #(.WIDTH(DIV_W), .FRAC_BITS(DIV_F)) u_div_y (
+  axis_fixed_div #(.WIDTH(DIV_W), .FRAC_BITS(DIV_F), .ELASTIC(0)) u_div_y (
     .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0), .s00_axis_tvalid(s2_valid),
     .s00_axis_tdata({s2_ay, s2_d}), .s00_axis_tstrb('1),
@@ -260,31 +262,59 @@ module axis_oct32_encode #
     .m00_axis_tlast(), .m00_axis_tdata(qy_raw), .m00_axis_tstrb()
   );
 
-  // Sideband rides an exact-match delay line: DIV_LAT deep, taken from the
-  // package so it cannot drift from the divider. Skew here would pair a
-  // quotient with another Sample's signs -- silent, and wrong by a reflection.
-  logic [2:0] sb [0:DIV_LAT-1];
-  logic       sb_last [0:DIV_LAT-1];
-  integer k;
+  // Sideband rides an ELASTIC FIFO, pushed when a beat is admitted to the
+  // dividers and popped when its quotient is consumed.
+  //
+  // It USED TO BE an exact-match delay line, DIV_LAT deep, shifted on front_en.
+  // That was correct only because the stallable divider gated its whole
+  // pipeline with the same enable, so the line and the divider moved in
+  // lockstep. A RIGID divider (#33) does not: its recurrence advances every
+  // cycle whatever front_en does, and its output ring holds results for a
+  // variable number of cycles under backpressure. A fixed-depth line cannot
+  // track that, and the failure mode is the silent one -- a quotient paired
+  // with another Sample's signs, wrong by a reflection.
+  //
+  // Push and pop are the divider's own admit and consume events, so the pairing
+  // is by construction rather than by depth arithmetic. Per ADR-0002 an elastic
+  // buffer need only EXCEED what it spans, which here is everything the rigid
+  // core can hold: its ring plus its output register.
+  localparam int SB_MIN_DEPTH =
+      ggx_latency_pkg::elastic_min_depth(
+          ggx_latency_pkg::rigid_ring_depth(DIV_LAT) + 1);
+  localparam int SB_DEPTH = 256;
+  localparam int SB_AW    = $clog2(SB_DEPTH);
+
+  initial begin
+    if (SB_DEPTH < SB_MIN_DEPTH)
+      $fatal(1, "axis_oct32_encode: SB_DEPTH=%0d is below the %0d entries needed to span the rigid dividers' ring and output register",
+             SB_DEPTH, SB_MIN_DEPTH);
+  end
+
+  logic [2:0]       sb      [0:SB_DEPTH-1];
+  logic             sb_last [0:SB_DEPTH-1];
+  logic [SB_AW-1:0] sb_wr_ptr, sb_rd_ptr;
+
+  wire div_in_fire  = s2_valid && front_en;
+  wire div_out_fire = div_x_out_valid && div_y_out_valid && pipe_en;
+
   always_ff @(posedge s00_axis_aclk) begin
     if (!s00_axis_aresetn) begin
-      for (k = 0; k < DIV_LAT; k = k + 1) begin
-        sb[k] <= 3'b0; sb_last[k] <= 1'b0;
+      sb_wr_ptr <= '0;
+      sb_rd_ptr <= '0;
+    end else begin
+      if (div_in_fire) begin
+        sb[sb_wr_ptr]      <= {s2_nz, s2_sy, s2_sx};
+        sb_last[sb_wr_ptr] <= s2_last;
+        sb_wr_ptr <= sb_wr_ptr + 1'b1;
       end
-    end else if (front_en) begin
-      sb[0] <= {s2_nz, s2_sy, s2_sx};
-      sb_last[0] <= s2_last;
-      for (k = 1; k < DIV_LAT; k = k + 1) begin
-        sb[k] <= sb[k-1];
-        sb_last[k] <= sb_last[k-1];
-      end
+      if (div_out_fire) sb_rd_ptr <= sb_rd_ptr + 1'b1;
     end
   end
 
-  wire d_sx = sb[DIV_LAT-1][0];
-  wire d_sy = sb[DIV_LAT-1][1];
-  wire d_nz = sb[DIV_LAT-1][2];
-  wire d_last = sb_last[DIV_LAT-1];
+  wire d_sx   = sb[sb_rd_ptr][0];
+  wire d_sy   = sb[sb_rd_ptr][1];
+  wire d_nz   = sb[sb_rd_ptr][2];
+  wire d_last = sb_last[sb_rd_ptr];
 
   // Registers a beat passes through outside the divider: s0, s0b, s1, s2 in
   // front, and the output register behind.
