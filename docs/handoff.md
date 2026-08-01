@@ -21,8 +21,9 @@ DSP-reduction / timing-closure decisions on this branch — the part that doesn'
 - **#22 (T16) — the path-shape survey.** `docs/surveys/t16-path-shapes.md`. It re-derived the campaign
   order, and three tickets were rewritten because their premises were wrong.
 
-Current measurement, `394ea9f`: **WNS −1.330, TNS −406.686, 1852 failing endpoints, 79 DSP, 8862 LUT,
-4.5 BRAM, 1302 CARRY4.**
+Current measurement, `d1a3467`: **WNS −1.451, TNS −268.146, 1232 failing endpoints, 79 DSP, 9001 LUT,
+4.5 BRAM, 1302 CARRY4.** (Was `394ea9f`: −1.330 / −406.686 / 1852 / 79 / 8862 / 4.5 / 1302, before
+#31.)
 
 The three findings that matter:
 
@@ -41,7 +42,56 @@ The three findings that matter:
 **Read TNS and WNS separately from here on.** #31 should move TNS hard and WNS not at all; #24 the
 reverse. Judging either on the wrong metric reads a success as a failure.
 
-Order: **#31 → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28.**
+Order: **~~#31~~ → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28.**
+
+## #31 is DONE (2026-08-01, `d1a3467`) — and it exposed the next one
+
+Three registered-ready cuts (`axis_fifo_2deep`, ADR-0003): at `projected_area`'s slave port, ahead of
+`sqrt_t`, and on each dimension's joined `{hash, sobol}` pair in the sampler.
+
+|  | before (`394ea9f`) | after (`d1a3467`) |
+|---|---|---|
+| WNS | −1.330 | **−1.451** (0.121 worse) |
+| TNS | −406.686 | **−268.146** (−34%) |
+| Failing endpoints | 1852 | **1232** (−33%) |
+| Endpoints on the chain (`ready_census.tcl`) | 875 (47.2%) | **0** |
+| LUT | 8862 | 9001 |
+
+**The chain is gone, not reduced** — zero failing endpoints through every one of the five census nets.
+WNS moved the wrong way by 0.121 ns, exactly as the ticket predicted it might: the holder is
+reproject's a-section multiply either way, which is #24's.
+
+**The win was the cut, not the fanout.** The nets came off the failing list at essentially unchanged
+fanout (627→614, 705→709, 699→706 — `ready_census.tcl` now reports this column). No `MAX_FANOUT`
+attribute and no replication was added. **The fanout lever is untouched and still available.**
+
+A **fourth** cut (ahead of `trig`, so no ready crosses two cores) was built, measured and **reverted**:
+−1.356 / −272.843 / 1488 — it buys 0.095 WNS for 256 endpoints and 4.7 ns of TNS. The segment it
+would have split measures **+0.523 ns** slack over 709 paths at three cuts. Both rows are in
+`sim/timing_history.csv`.
+
+### What it exposed: `oct32` is now the same defect, in fanout form
+
+`oct32` went **35 → 694 endpoints** — 56% of everything that still fails. It was always there, hidden
+under the bigger chain. Its worst path:
+
+```
+u_reproject_normalize/m00_axis_tvalid_reg/C
+  → 1 LUT → u_oct32/u_div_y/divisor_reg[11][12]/CE     −0.534, 87.9% route
+```
+
+A clock enable again, and the same `pipe_en = m_ready || !m_valid` idiom — but **one logic level**.
+There is no chain to cut here, so #31's lever does not apply.
+
+**Nor is it simply "add MAX_FANOUT" — Vivado has already replicated this enable itself.** The netlist
+holds ~35 separate `m00_axis_tready*` nets inside the two dividers (fanouts 41, 41, 33, rest at 2).
+An already-split enable that is still 88% route says the loads are physically far from their drivers,
+not that there are too many per driver. The candidate fixes are replication *with placement intent*,
+a floorplan, or deleting the stall outright — running the dividers free behind a FIFO deep enough
+that they are never backpressured, which is the root-cause fix ADR-0003 deliberately did not take.
+Filed as its own ticket; it is a different piece of work from #28's keep-or-revert decision.
+
+Second-largest is `basis_normalize` at 163 (−0.950), which is #25 — next in the order, unchanged.
 
 ## Pipeline (top = `axis_ggx_control`)
 `u_basis` (event_basis, **PER-BURST** — computed once, then N samples stream) → then the **PER-SAMPLE**
@@ -213,6 +263,8 @@ which is what ADR-adjacent issue #3 predicted. It is still a regression and is r
 | #16 Oct32, first attempt | **−2.154** | −3835 | 10630 |
 | #16 Oct32 + encoder stage-0 split | −1.478 | −778 | 3429 |
 | #16 + encoder enable fix (final) | **−1.330** | **−407** | **1852** |
+| #31 ready-chain cuts (`d1a3467`) | −1.451 | **−268** | **1232** |
+| #31 fourth cut, REVERTED (`19dfebb`) | −1.356 | −273 | 1488 |
 
 **ADR-0001's timing premise is NOT borne out, though the final picture is mixed
 rather than simply bad.** The ADR argued the per-sample normalize was "the
