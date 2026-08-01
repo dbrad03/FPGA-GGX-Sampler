@@ -238,9 +238,11 @@ in norm3's wrapper — so nothing needed re-proving beyond the ordinary gate, an
 check` is bit-identical over 480 Samples. And the second, differently-shaped population under the
 worst path **is real** (see below), but it did not blunt the fix.
 
-Gates at `e27421f`: Bias **mean_signed (+2.772e-07, −1.504e-06, +2.928e-07)** against the 8e-6 tap,
-Stream-integrity **480/480, 0 mismatches**, full cascade green (20 runners plus the harness's own
-28 unit tests).
+Gates at `e27421f`, from one `python sim/test_ggx_control.py` run (it prints both, and the harness
+refuses to compare a baseline against a run whose gates failed): Bias **mean_signed (+2.772e-07,
+−1.504e-06, +2.928e-07)** against the 8e-6 tap, Stream-integrity **480/480, max_dev 0.001882,
+0 mismatches**. Every cocotb test file in `sim/` was run — **20**, not the 16 the ticket's invariant
+says; the cascade has grown since that phrasing — plus `test_harness.py`'s 28 unit tests.
 
 `NORM3_WRAPPER_STAGES` 9 → 10. norm3 is instantiated exactly once, by event_basis, with
 `FOLD_INVSQRT=1`, so the cycle is Per-burst and free; its consumer is the `hs_*` elastic chain,
@@ -248,25 +250,37 @@ which has no exact-match depth to keep. **No per-sample block gained a stage.**
 
 ### The residual is 21 endpoints of one shape, and it is #24's residual again
 
-Every remaining `basis_normalize` endpoint is `fabric FF → DSP48E1 A port`, **0 logic levels**, on
-the s3a normalize multiplies and the input-square DSPs. The worst:
+The block's 12 worst remaining endpoints are all the same shape — `fabric FF → DSP48E1 A port`,
+**0 logic levels** — split between the s3a normalize multiplies and the input-square DSPs. (12 of
+the 21, not all 21: `get_timing_paths` was read down to the worst 12 in the block and the rest were
+counted, not inspected. The survey report itself only ever holds the worst path per block.) The
+worst:
 
 ```
 s3s_y_q856[37]_i_1_psdsp_4/C → mul_pre_q131_q725_to_q856_return0__0/A[19]
   −0.158, data path 1.352 ns, 0 levels
 ```
 
-1.352 ns of data path against a **3.722 ns `Setup_dsp48e1_CLK_A[19]`**. All five of the block's DSPs
-report `AREG=0 BREG=0 MREG=0 PREG=1`: with no register on the A path and none on the product, the
-whole 18×25 array is in the same cycle as the operand route. That is the *identical* arc, at the
-*identical* 3.722 ns, that #24 left behind on reproject's a-section — and the fix is the same one
-that section needs, a separate operand stage for the DSP to absorb. **It still has no ticket.** It
-now has two call sites, which is the argument for raising it at #26.
+1.352 ns of data path against a **3.722 ns `Setup_dsp48e1_CLK_A[19]`**. All six of the block's DSPs
+report `AREG=0 BREG=0 PREG=1` (five with `MREG=0`; only `z2_d_reg` has `MREG=1`): with no register
+on the A path and none on the product, the whole 18×25 array is in the same cycle as the operand
+route. That is the *identical* arc, at the *identical* 3.722 ns, that #24 left behind on reproject's
+a-section — and the fix is the same one that section needs, a separate operand stage for the DSP to
+absorb. **It still has no ticket.** It now has two call sites, which is the argument for raising it
+at #26.
 
 (The startpoint's name is a placer artifact. `_psdsp_` cells are replicas the placer created next to
 the DSP, and Vivado named them after an unrelated `s3s` cone; 318 of them exist inside norm3. Do not
 read the RTL signal name off a post-route cell name — `get_cells` on any of this block's RTL operand
 registers returns nothing, and that is renaming, not deletion.)
+
+**None of the three paragraphs above is in a saved report** — `survey_paths.rpt` holds only the
+worst path per block. They come from a `routed.dcp` query, which is the cheap way to ask this kind
+of question (ADR-adjacent note: P&R is ~12 minutes, reopening a checkpoint is seconds). To reproduce
+against the run's `routed.dcp`: `get_property {AREG BREG MREG PREG}` over
+`get_cells -hier -filter {REF_NAME =~ DSP48*}` under `u_basis/normalize_warped_view`,
+`get_timing_paths -slack_lesser_than 0` filtered on that prefix for the endpoint list, and
+`get_cells -hier -filter {NAME =~ */*_psdsp* && IS_SEQUENTIAL}` for the replica count.
 
 ### The new WNS holder: a BRAM read into a BRAM address
 

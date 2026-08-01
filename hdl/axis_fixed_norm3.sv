@@ -73,15 +73,22 @@ module axis_fixed_norm3#
       + 1;  // m00_axis:  output register
   localparam int WRAPPER_STAGES = PRE_INVSQRT_STAGES + POST_INVSQRT_STAGES;
 
-  // reproject sizes its META1 TLAST FIFO from the package's figure for this
-  // block, so that figure has to be this block's, not a number that once
-  // matched. A stage added here without updating the package would leave that
-  // FIFO sized against a fiction -- and stages HAVE been added here before
-  // (see "norm3: add a stage so the normalize multiply feeds DSPs from clean
-  // registers"). See docs/adr/0002-latency-package-is-law.md.
+  // This figure has to be this block's, not a number that once matched --
+  // stages HAVE been added here before (see "norm3: add a stage so the
+  // normalize multiply feeds DSPs from clean registers", and the #25
+  // shift/saturate split). See docs/adr/0002-latency-package-is-law.md.
+  //
+  // The reader this check was written for is GONE: reproject used to size its
+  // META1 TLAST FIFO from NORM3_WRAPPER_STAGES, and stopped when the Oct32
+  // encoder replaced the per-sample normalize (issue #16). Nothing outside
+  // this file reads the constant today. The check stays anyway, because
+  // ADR-0002's rule is that the producer derives from the package too -- a
+  // constant only consumers read is documentation, and documentation drifts.
+  // If a second reader ever appears, it inherits a figure that is already
+  // known to be true.
   initial begin
     if (WRAPPER_STAGES != ggx_latency_pkg::NORM3_WRAPPER_STAGES)
-      $fatal(1, "axis_fixed_norm3: this block wraps its inverse-sqrt in %0d register stages but ggx_latency_pkg::NORM3_WRAPPER_STAGES says %0d. Update the package (and re-check reproject's META1 depth).",
+      $fatal(1, "axis_fixed_norm3: this block wraps its inverse-sqrt in %0d register stages but ggx_latency_pkg::NORM3_WRAPPER_STAGES says %0d. Update the package.",
              WRAPPER_STAGES, ggx_latency_pkg::NORM3_WRAPPER_STAGES);
   end
 
@@ -415,12 +422,21 @@ module axis_fixed_norm3#
   endfunction
 
   // scale_q856_to_q131 used to be one function -- barrel shift then saturate --
-  // evaluated in a single cycle. That cycle was the design's WNS path at
-  // -0.822 (T16, issue #22): 9 logic levels and 5 CARRY4, the 16-way shifter's
-  // mux tree feeding the saturate comparators' carry chains. Issue #25 splits
-  // it at the obvious seam, so each half gets a cycle of its own. The two
-  // halves below compose to exactly the old expression -- this is a register
-  // split, not an arithmetic change.
+  // evaluated in a single cycle: 9 logic levels and 5 CARRY4, the 16-way
+  // shifter's mux tree feeding the saturate comparators' carry chains, the
+  // most carry chains in one cycle anywhere in the T16 survey. It measured
+  // -0.822 as this BLOCK's worst path at T16 (`docs/surveys/t16-path-shapes.md`,
+  // where the design's WNS was -1.330 elsewhere), and became the design's WNS
+  // holder at -0.764 by `504f007`. Issue #25 splits it at the obvious seam, so
+  // each half gets a cycle of its own. The two halves below compose to exactly
+  // the old expression -- this is a register split, not an arithmetic change.
+  //
+  // Format note: what leaves this function is NOT still Q8.56. It is the Q1.31
+  // result sitting in a 64-bit container, with the out-of-range headroom above
+  // bit 31 that saturate_q1_31 then inspects. The name says where the shift
+  // starts, because the s3s_*_q856 registers it feeds are the cells the #25
+  // writeup and its survey_paths.rpt quote by name; renaming them would
+  // desynchronize that writeup from its own evidence.
   function automatic logic signed [63:0] shift_q856(
     input logic signed [63:0] prod_q8_56,
     input logic         [3:0] shift

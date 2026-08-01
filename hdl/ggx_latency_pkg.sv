@@ -119,8 +119,10 @@ package ggx_latency_pkg;
   // Composite blocks
   //--------------------------------------------------------------------------
 
-  // axis_fixed_norm3 (FOLD_INVSQRT = 0) wraps the pipelined inverse-sqrt in
-  // this many additional register stages (lensq, scaling, output rounding).
+  // axis_fixed_norm3 wraps whichever inverse-sqrt its FOLD_INVSQRT generate
+  // picks in this many additional register stages (lensq, scaling, output
+  // rounding). The count is the same either way -- it is the wrapper's depth,
+  // not the engine's. The only live instance is event_basis's, FOLD_INVSQRT=1.
   // 9 -> 10 for issue #25: the output scale was one stage doing a 16-way
   // barrel shift and a saturate, and is now two.
   localparam int NORM3_WRAPPER_STAGES = 10;
