@@ -461,6 +461,9 @@ async def test_ggx_control(dut):
     stream_expected = []
     stream_state = {"idx": 0, "max_dev": 0.0}
     stream_failures = []
+    # Bias gate, relocated (issue #15). See the tap note below.
+    expected_pre = []
+    pre_stats = {"n": 0, "signed_sum": np.zeros(3), "abs_sum": np.zeros(3), "max_err": 0.0}
 
     def input_model_cb(transaction):
         data = int(transaction["data"]) & 0xFFFF_FFFF_FFFF_FFFF
@@ -502,6 +505,36 @@ async def test_ggx_control(dut):
                 t3 = np.sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2))
                 h_unnorm = t1 * t1_vec + t2 * t2_vec + t3 * vh_vec
                 expected_math.append(norm3_ref_like_rtl(h_unnorm))
+                expected_pre.append(np.asarray(h_unnorm, dtype=np.float64))
+
+    async def pre_encoder_bias_model():
+        # RELOCATED BIAS GATE TAP (issue #15, ADR-0001 exception).
+        #
+        # This reaches INTO the DUT, at the un-normalized half-vector feeding
+        # u_norm_h, rather than asserting at the output boundary. That is a
+        # deliberate exception, not an oversight: once the Oct32 encoder
+        # replaces the per-sample normalize, the 16-bit field quantization step
+        # is ~3e-5 and swamps the 8e-6 systematic-bias threshold outright. The
+        # gate cannot survive at the boundary, and it is the project's sharpest
+        # instrument, so it moves inward instead of being weakened.
+        #
+        # Do NOT "fix" this back to the output boundary. The encoder is checked
+        # separately by test_oct32_encode against the model in oct32_model.py.
+        rising_edge = RisingEdge(dut.s00_axis_aclk)
+        node = dut.u_reproject_normalize
+        while True:
+            await rising_edge
+            if node.fifo_norm_valid.value and node.fifo_norm_ready.value:
+                packed = int(node.fifo_norm_data.value) & ((1 << 96) - 1)
+                got = unpack_vec96_q131_xyz(packed)
+                if not expected_pre:
+                    raise AssertionError("pre-encoder tap fired with no expectation queued")
+                exp = expected_pre.pop(0)
+                d = got - exp
+                pre_stats["signed_sum"] += d
+                pre_stats["abs_sum"] += np.abs(d)
+                pre_stats["max_err"] = max(pre_stats["max_err"], float(np.max(np.abs(d))))
+                pre_stats["n"] += 1
 
     def output_check_cb(transaction):
         # --- Stream-integrity gate ------------------------------------
@@ -591,6 +624,7 @@ async def test_ggx_control(dut):
 
     cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
     cocotb.start_soon(reproj_input_model())
+    cocotb.start_soon(pre_encoder_bias_model())
     await reset(dut.s00_axis_aclk, dut.s00_axis_aresetn, cycles_held=5, polarity=0)
 
     rng = np.random.default_rng(121)
@@ -672,6 +706,22 @@ async def test_ggx_control(dut):
         f"STREAM-INTEGRITY GATE: {len(stream_failures)} mismatch(es) against the "
         f"independent Command-derived reference (max_dev={stream_state['max_dev']:.6f}, "
         f"tol={STREAM_TOL:.1e}; first 8 shown):\n  " + "\n  ".join(stream_failures[:8])
+    )
+
+    # --- Bias gate at the relocated pre-encoder tap (issue #15) ----------
+    assert pre_stats["n"] > 0, "pre-encoder bias tap never fired -- the tap is broken, not the design"
+    pre_mean = pre_stats["signed_sum"] / pre_stats["n"]
+    dut._log.info(
+        f"BIAS GATE (pre-encoder tap): n={pre_stats['n']} "
+        f"mean_signed=({pre_mean[0]:+.3e},{pre_mean[1]:+.3e},{pre_mean[2]:+.3e}) "
+        f"mean_abs=({pre_stats['abs_sum'][0]/pre_stats['n']:.3e},"
+        f"{pre_stats['abs_sum'][1]/pre_stats['n']:.3e},"
+        f"{pre_stats['abs_sum'][2]/pre_stats['n']:.3e}) "
+        f"max|err|={pre_stats['max_err']:.3e}"
+    )
+    assert np.all(np.abs(pre_mean) < BIAS_TOL), (
+        f"BIAS GATE (pre-encoder tap): systematic bias exceeded {BIAS_TOL:.1e}: "
+        f"mean_signed=({pre_mean[0]:+.3e},{pre_mean[1]:+.3e},{pre_mean[2]:+.3e})"
     )
 
     assert parser["cmd_count"] == len(cmds), f"expected {len(cmds)} commands, saw {parser['cmd_count']}"
