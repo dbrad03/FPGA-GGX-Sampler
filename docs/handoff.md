@@ -169,6 +169,44 @@ The WNS holder moved to `u_basis/t2a_x_reg` / `t2a_z0_reg` — the **T2 arithmet
 change does not touch. Read as placement/routing churn on an unrelated path rather than causation,
 which is what ADR-adjacent issue #3 predicted. It is still a regression and is recorded as one.
 
+### Workstreams C, D and the T2 band (2026-07-31, in order, each its own P&R run)
+
+| step | WNS | TNS | failing eps |
+|---|---|---|---|
+| 031323a (before C) | −2.078 | −1653 | 5929 |
+| C: event_basis elastic rebuild | −2.139 | −1242 | 3249 |
+| #17 stage 4d (T2 saturate/round split) | −0.992 | −423 | 1992 |
+| #17 stage 5d (T2 sat/add split) | −1.178 | −543 | 2081 |
+| #16 Oct32, first attempt | **−2.154** | −3835 | 10630 |
+| #16 Oct32 + encoder stage-0 split | **−1.478** | −778 | 3429 |
+
+**ADR-0001's timing premise is CONTRADICTED by measurement, and this is the
+headline result of the Oct32 work.** The ADR argued that the per-sample
+normalize was "the largest block in the design and the holder of worst negative
+slack", so deleting it would help closure. Deleting it is functionally correct —
+the encoder is scale-invariant, the bias gate reading is unchanged, the stream
+gate passes — but timing went from −1.178 to −1.478, a **0.30 ns net
+regression**, with TNS 543 → 778 and failing endpoints 2081 → 3429.
+
+What it bought: DSP 85 → 79, LUT 9296 → 8947, BRAM unchanged, FF 18290 → 18888,
+and the output contract shrinks 128 → 32 bits (the DDR3 bandwidth argument).
+
+Why it did not pay off in timing: the normalize was replaced by an encoder
+containing TWO 78-stage dividers on the per-sample path. The block is smaller in
+DSPs but not obviously easier to place, and the WNS holder simply reverted to
+reproject's a-section DSP multiply (`mul_pre_q131_q131_to_q262`), the same paths
+that held it before at −1.178, now worse at −1.478 from added congestion.
+
+**This is a decision point, not a settled outcome.** Keeping Oct32 is defensible
+for the bandwidth and DSP savings; reverting it is defensible if single-lane
+closure is the only goal. The evidence is here rather than an argument either way.
+
+**A process note worth keeping:** the encoder synthesized standalone at −0.282
+and was integrated on that basis; in context, post-route, it was −2.154 and the
+design's worst path, from three absolute values and two adds sharing a cycle
+behind a distributed-RAM read. OOC synth is badly optimistic on this design for
+NEW blocks too, not just for changes to existing ones.
+
 ### The staircase, as measured at 031323a
 The top five violating paths are now **all per-burst `u_basis` t1b→t2 DSP paths**, which inverts the
 old priority — the reproject floorplan was wall #1, and is not the binder any more:
