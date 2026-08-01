@@ -21,12 +21,17 @@ DSP-reduction / timing-closure decisions on this branch — the part that doesn'
 - **#22 (T16) — the path-shape survey.** `docs/surveys/t16-path-shapes.md`. It re-derived the campaign
   order, and three tickets were rewritten because their premises were wrong.
 
-Current measurement, `504f007`: **WNS −0.764, TNS −157.352, 580 failing endpoints, 79 DSP, 9211 LUT,
+Current measurement, `e27421f`: **WNS −0.301, TNS −5.789, 94 failing endpoints, 79 DSP, 9126 LUT,
 4.5 BRAM, 1324 CARRY4.**
 
-Campaign so far, from `394ea9f` (−1.330 / −406.686 / 1852): **TNS −61%, endpoints −69%, WNS 0.566
-better.** Three tickets did that — #31 (the ready chain), #33 (oct32's clock enable) and #24 (the
-a-section capture Vivado had swallowed into a DSP).
+Campaign so far, from `394ea9f` (−1.330 / −406.686 / 1852): **TNS −99%, endpoints −95%, WNS 1.029
+better.** Four tickets did that — #31 (the ready chain), #33 (oct32's clock enable), #24 (the
+a-section capture Vivado had swallowed into a DSP) and #25 (norm3's shift/saturate split).
+
+**The design is now within 0.301 ns of closing at 200 MHz**, on 94 endpoints spread across five
+blocks with no single dominant population. That is a different regime from the one the campaign was
+planned in, and the remaining tickets were costed against a 1.3 ns problem. Re-read #26 (the
+checkpoint) before scheduling more of them.
 
 The three findings that matter:
 
@@ -47,27 +52,28 @@ The three findings that matter:
 reverse. That held for #31 and **did not hold for #24**, which moved both. Judging either on the
 wrong metric reads a success as a failure — but do not treat the split as a prediction either.
 
-Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → #25 → #26 (checkpoint) → #23, #32, #27 → #28.**
+Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → ~~#25~~ → #26 (checkpoint) → #23, #32, #27 → #28.**
 (#24 was taken before #25; it was never blocked on it.)
 
-Where the endpoints are now, measured at `504f007` (survey re-run against that run's `routed.dcp`):
+Where the endpoints are now, measured at `e27421f` by `harness.py survey`:
 
 | ticket | block | endpoints | worst |
 |---|---|---|---|
-| **#25** T19 | `basis_normalize` | **129** | **−0.764 (WNS)** |
-| **#24/#26** | `reproject_binder` | 96 | −0.581 |
-| **#32** T26 | `oct32` carry split | 34 | −0.392 |
-| **#27** T21 | `projected_area_sq` | 4 | −0.120 |
-| **#23** T17 | `sampler_hash0` | 0 | — |
-| — | unbucketed | 317 | — |
+| — | `projected_area` trig address | ? | **−0.301 (WNS)** |
+| **#25/#26** | `basis_normalize` | 21 | −0.158 |
+| **#24/#26** | `reproject_binder` | 10 | −0.114 |
+| **#32** T26 | `oct32` carry split | 3 | −0.034 |
+| **#23** T17 | `sampler_hash0` | 2 | −0.029 |
+| **#27** T21 | `projected_area_sq` | 2 | −0.011 |
+| — | unbucketed | 56 | — |
 
-All four sampler buckets — `hash0`, `hash1`, `scram0`, `scram1` — now have **no failing endpoint at
-all**, so #23 currently has nothing to fix.
+All four sampler buckets — `hash0`, `hash1`, `scram0`, `scram1` — are effectively closed; `scram0`,
+`scram1` and `hash1` have **no failing endpoint at all** and the survey reports them as unmatched.
+#23 has 2 endpoints at −0.029 and is not worth its own ticket any more.
 
-Two things to note before picking up #25. First, **317 of the 580 are unbucketed** — no ticket owns
-them, and that is still the largest single share. Survey before assuming #25 is the biggest lever.
-Second, `reproject_binder` changed shape rather than closing: 8 deep endpoints became 96 shallow
-ones, all of them the same `fabric FF → DSP A` hop. See "#24 is DONE".
+**The new WNS holder has no ticket.** It is in `projected_area`, and it is a BRAM read into a BRAM
+address — see "#25 is DONE" below. Do not assume the remaining tickets are the remaining work: the
+five bucketed blocks hold 38 of the 94 endpoints between them, and none of them holds WNS.
 
 ## #31 is DONE (2026-08-01, `d1a3467`) — and it exposed the next one
 
@@ -204,6 +210,79 @@ A-port path is only **−0.115** (`b0_t1_s_reg[30]` → 3 LUT6 → `b1p_hx_t1_q2
 absorption is not itself the defect: an absorbed pre-adder register is *cheap on the DSP side* and
 expensive on the side feeding it. The a-section was the one that lost, because what fed it was a
 distributed-RAM read. Read that before generalising "absorption is bad" into a rule.
+
+## #25 is DONE (2026-08-01, `e27421f`) — the split the survey predicted, and it landed
+
+One register. norm3's output scale was a single stage doing a 16-way arithmetic shift by
+`(23 + shift)` *and* the two 64-bit saturation compares that follow it. T16 measured that cycle at
+9 logic levels and **5 CARRY4** — the most carry chains in one cycle anywhere in the survey.
+`scale_q856_to_q131` is now `shift_q856` into a new **S3S** register, with the existing
+`saturate_q1_31` applied a cycle later. The two halves compose to exactly the old expression.
+
+|  | before (`504f007`) | after (`e27421f`) |
+|---|---|---|
+| WNS | −0.764 | **−0.301** (0.463 BETTER) |
+| TNS | −157.352 | **−5.789** (−96%) |
+| Failing endpoints | 580 | **94** (−84%) |
+| `basis_normalize` endpoints / worst | 129 / −0.764 | **21 / −0.158** |
+| DSP / LUT / BRAM / CARRY4 | 79 / 9211 / 4.5 / 1324 | 79 / **9126** / 4.5 / 1324 |
+
+**This is the largest single move of the campaign, and the only ticket whose premise the survey had
+confirmed in advance.** It is also the one place where "count the CARRY4 on the path" was the whole
+analysis. Note LUT went *down* by 85 with a stage added: the shifter and the comparators stopped
+being mapped as one cone.
+
+Two of the ticket's stated risks did not materialise, and it is worth saying so explicitly rather
+than leaving them open. The folded recurrence was **not touched** — the split is outside the engine,
+in norm3's wrapper — so nothing needed re-proving beyond the ordinary gate, and `harness.py baseline
+check` is bit-identical over 480 Samples. And the second, differently-shaped population under the
+worst path **is real** (see below), but it did not blunt the fix.
+
+Gates at `e27421f`: Bias **mean_signed (+2.772e-07, −1.504e-06, +2.928e-07)** against the 8e-6 tap,
+Stream-integrity **480/480, 0 mismatches**, full cascade green (20 runners plus the harness's own
+28 unit tests).
+
+`NORM3_WRAPPER_STAGES` 9 → 10. norm3 is instantiated exactly once, by event_basis, with
+`FOLD_INVSQRT=1`, so the cycle is Per-burst and free; its consumer is the `hs_*` elastic chain,
+which has no exact-match depth to keep. **No per-sample block gained a stage.**
+
+### The residual is 21 endpoints of one shape, and it is #24's residual again
+
+Every remaining `basis_normalize` endpoint is `fabric FF → DSP48E1 A port`, **0 logic levels**, on
+the s3a normalize multiplies and the input-square DSPs. The worst:
+
+```
+s3s_y_q856[37]_i_1_psdsp_4/C → mul_pre_q131_q725_to_q856_return0__0/A[19]
+  −0.158, data path 1.352 ns, 0 levels
+```
+
+1.352 ns of data path against a **3.722 ns `Setup_dsp48e1_CLK_A[19]`**. All five of the block's DSPs
+report `AREG=0 BREG=0 MREG=0 PREG=1`: with no register on the A path and none on the product, the
+whole 18×25 array is in the same cycle as the operand route. That is the *identical* arc, at the
+*identical* 3.722 ns, that #24 left behind on reproject's a-section — and the fix is the same one
+that section needs, a separate operand stage for the DSP to absorb. **It still has no ticket.** It
+now has two call sites, which is the argument for raising it at #26.
+
+(The startpoint's name is a placer artifact. `_psdsp_` cells are replicas the placer created next to
+the DSP, and Vivado named them after an unrelated `s3s` cone; 318 of them exist inside norm3. Do not
+read the RTL signal name off a post-route cell name — `get_cells` on any of this block's RTL operand
+registers returns nothing, and that is renaming, not deletion.)
+
+### The new WNS holder: a BRAM read into a BRAM address
+
+```
+u_projected_area/meta0_u2_reg/CLKARDCLK        (RAMB18E1)
+  → DOBDO[10] → 1 LUT2 → u_trig/s1_addr_reg_1/ADDRARDADDR[9]   (RAMB36E1)
+  −0.301, 4.420 ns data path, 2.454 ns of it the RAMB18's own clock-to-out
+```
+
+**This is the fourth instance of the failure mode this file already names twice** (BRAM absorption
+and the sideband FIFO under #33, the pre-adder absorption under #24): *a RAM read sharing a cycle
+with something else.* Here it is a metadata BRAM read reaching the trig ROM's address port through
+one LUT. 2.454 ns of the 5 ns budget is gone before any logic runs, so the lever is a register
+between the two RAMs, not the LUT.
+
+It is in `projected_area` and **no ticket owns it** — it was inside the unbucketed 317 at `504f007`.
 
 ## Pipeline (top = `axis_ggx_control`)
 `u_basis` (event_basis, **PER-BURST** — computed once, then N samples stream) → then the **PER-SAMPLE**
@@ -380,6 +459,8 @@ which is what ADR-adjacent issue #3 predicted. It is still a regression and is r
 | #33 rigid dividers, ring in BRAM (`f2a64eb`) | −2.517 | −1296 | 2869 |
 | #33 ring forced to fabric (`b1b0f6a`) | −1.434 | −293 | 1116 |
 | #33 sideband inside the core (`28489e4`) | **−1.045** | **−184** | **875** |
+| #24 a0 rounding regs kept in fabric (`504f007`) | **−0.764** | **−157** | **580** |
+| #25 norm3 shift/saturate split (`e27421f`) | **−0.301** | **−5.8** | **94** |
 
 **ADR-0001's timing premise is NOT borne out, though the final picture is mixed
 rather than simply bad.** The ADR argued the per-sample normalize was "the
