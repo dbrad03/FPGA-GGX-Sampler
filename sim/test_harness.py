@@ -23,6 +23,7 @@ from harness import (  # noqa: E402
     dsp_deviation,
     parse_baseline,
     parse_metrics,
+    Sample,
     read_rows,
     render_baseline,
 )
@@ -178,10 +179,17 @@ def test_read_rows_of_a_missing_file_is_empty():
 
 
 BASELINE_SAMPLES = [
-    (0, 0, 0x1234ABCD, 0),
-    (0, 1, 0x0000FFFF, 1),
-    (1, 0, 0xDEADBEEF, 1),
+    Sample(0, 0, 0x1234ABCD, 0),
+    Sample(0, 1, 0x0000FFFF, 1),
+    Sample(1, 0, 0xDEADBEEF, 1),
 ]
+
+
+def test_a_dump_without_a_header_still_parses():
+    # test_ggx_control writes its dump through render_baseline(header=False);
+    # `baseline check` parses it with the same parser that reads the committed
+    # file. If those two ever disagree the harness compares nothing.
+    assert parse_baseline(render_baseline(BASELINE_SAMPLES, header=False)) == BASELINE_SAMPLES
 
 
 def test_baseline_round_trips_through_its_own_format():

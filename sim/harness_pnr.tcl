@@ -12,12 +12,14 @@
 # Vivado exits 0 on plenty of failures, so the sentinel is what proves the flow
 # reached the end rather than dying after route_design.
 #
-# Most resource counts come from cell queries rather than report_utilization's
-# tables, because the queries are what the numbers mean and `get_cells -hier
-# -filter` does not move between Vivado releases. LUTs are the exception: "Slice
-# LUTs" counts SITES, so a LUT6_2 or a packed LUT5 pair is one, and a cell query
-# reports ~100 more than every LUT figure ever quoted for this design. That one
-# number is taken from the report so it stays comparable to the existing record.
+# DSP and CARRY4 come from cell queries, because the query IS what the number
+# means and `get_cells -hier -filter` does not move between Vivado releases.
+# LUTs do not: "Slice LUTs" counts SITES, so a packed LUT5 pair is one site but
+# two cells, and the cell query reports ~300 more than every LUT figure ever
+# quoted for this design (9159 vs 8862 on the same netlist). Slice LUTs is both
+# what competes for the device and what the record is in, so it is taken from
+# the report -- guarded by the regexp below, which fails loudly if that table
+# ever stops looking like itself.
 #
 # The design $readmemh's ggx_trig_rom.mem by BARE NAME, so it resolves against
 # the CWD Vivado was launched in, not against hdl/. harness.py stages the .mem
@@ -57,20 +59,23 @@ report_timing_summary -file timing_summary_harness.rpt
 report_utilization -file util_harness.rpt
 set util_text [report_utilization -return_string]
 
-# WNS: worst setup slack in the design, failing or not. -max_paths 1 without
-# -slack_lesser_than so a design that closes still reports its real margin.
-set worst [get_timing_paths -setup -max_paths 1]
-set wns [get_property SLACK [lindex $worst 0]]
-
-# TNS is the sum over FAILING ENDPOINTS of their worst slack, which is exactly
-# one path per endpoint: -nworst 1 -unique_pins. The same query gives the
-# failing endpoint count, so the two numbers can never disagree about which
-# endpoints they counted.
-set paths [get_timing_paths -setup -max_paths 200000 -slack_lesser_than 0.0 \
-             -nworst 1 -unique_pins]
-set failing [llength $paths]
-set tns 0.0
-foreach p $paths { set tns [expr {$tns + [get_property SLACK $p]}] }
+# WNS, TNS and the failing endpoint count come from the Design Timing Summary --
+# Vivado's own published figures, and the ones every existing note about this
+# design quotes. Summing per-path slacks in Tcl instead looks equivalent and is
+# not: it accumulates values already rounded to 3 decimals, which came out
+# 0.032 ns off Vivado's TNS over 1852 endpoints. A harness whose numbers are
+# almost the tool's is worse than useless for comparing against the record.
+#
+# The table's data row is 12 numeric columns and the design-level summary is the
+# first such row in the report, ahead of the per-clock breakdown:
+#   WNS  TNS  TNS-failing  TNS-total  WHS  THS  THS-failing  THS-total  WPWS ...
+set summary [report_timing_summary -return_string]
+if {![regexp -line \
+      {^\s*(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(\d+)\s+(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(\d+)\s+(\d+)\s+(-?\d+\.\d+)\s+(-?\d+\.\d+)\s+(\d+)\s+(\d+)\s*$} \
+      $summary -> wns tns failing total_endpoints whs ths thsfail thstotal wpws tpws pwsfail pwstotal]} {
+  error "report_timing_summary printed no Design Timing Summary data row --\
+         either the design has no constrained paths, or the report layout changed"
+}
 
 proc ggx_count {pattern} {
   set cells [get_cells -quiet -hier -filter "REF_NAME =~ $pattern"]
@@ -80,7 +85,7 @@ proc ggx_count {pattern} {
 set dsp    [ggx_count {DSP48*}]
 set carry4 [ggx_count {CARRY4*}]
 
-# "| Slice LUTs | 8947 | ..." -- see the site-vs-cell note in the header.
+# "| Slice LUTs | 8862 | ..." -- see the site-vs-cell note in the header.
 if {![regexp {\|\s*Slice LUTs\s*\|\s*(\d+)\s*\|} $util_text -> lut]} {
   error "report_utilization printed no 'Slice LUTs' row -- its table layout\
          changed, and the LUT column would silently stop being comparable"
@@ -91,8 +96,8 @@ set ramb18 [ggx_count {RAMB18*}]
 # the datasheet budget are both in.
 set bram [expr {$ramb36 + 0.5 * $ramb18}]
 
-puts "GGXMETRIC wns [format %.3f $wns]"
-puts "GGXMETRIC tns [format %.3f $tns]"
+puts "GGXMETRIC wns $wns"
+puts "GGXMETRIC tns $tns"
 puts "GGXMETRIC failing_endpoints $failing"
 puts "GGXMETRIC dsp $dsp"
 puts "GGXMETRIC lut $lut"

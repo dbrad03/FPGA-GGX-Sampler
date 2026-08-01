@@ -1,8 +1,9 @@
 # test_ggx_control Oct32 output baseline.
 #
 # One line per Sample:  <burst> <sample_idx> <oct32_hex> <tlast>
-# The Oct32 word is exactly what the Lane put on the output stream: low 16 bits
-# the first field, high 16 the second (ADR-0001).
+# The Oct32 word is exactly what the Lane put on the output stream. ADR-0001
+# fixes the encoding and its 2x16-bit width; the field ORDER is
+# {field_w, field_u}, from hdl/axis_oct32_encode.sv.
 #
 # Captured and compared with:  python sim/harness.py baseline capture|check
 # Contains no timestamp, no simulation time and no absolute path by design, so

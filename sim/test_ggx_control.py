@@ -761,11 +761,13 @@ async def test_ggx_control(dut):
     # every later comparison then certifies as correct, so the dump is placed
     # where an earlier assert can only prevent it, never produce it.
     if OCT32_DUMP_PATH:
+        from harness import render_baseline
+
         dump = Path(OCT32_DUMP_PATH)
         dump.parent.mkdir(parents=True, exist_ok=True)
-        dump.write_text(
-            "".join(f"{b} {i} {w:08x} {l}\n" for b, i, w, l in oct32_dump)
-        )
+        # Through harness.render_baseline rather than a second format string
+        # here, so the dump and the committed baseline cannot drift apart.
+        dump.write_text(render_baseline(oct32_dump, header=False))
         dut._log.info(f"Oct32 dump: {len(oct32_dump)} Samples -> {dump}")
 
 

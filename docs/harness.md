@@ -30,8 +30,8 @@ Two guards enforce that:
 - The run is **refused outright** if Vivado could not read a ROM, or if the flow
   did not print its completion sentinel. Vivado exits 0 in both cases.
 - A row whose **DSP count differs from the previous row** is refused unless the
-  run says why: `--note "folded the inv_sqrt"`. `--allow-dsp-change` records it
-  with no explanation, and is the wrong answer nearly every time.
+  run says why: `--note "folded the inv_sqrt"`. There is deliberately no flag
+  that records the change with no explanation.
 
 `dirty=True` means the tree had uncommitted changes, so the row cannot be
 reproduced from its SHA. Prefer committing first.
@@ -43,20 +43,40 @@ anything, so the extraction is pinned:
 
 | Column | Extracted as |
 | --- | --- |
-| `wns` | slack of the worst setup path, failing or not |
-| `tns`, `failing_endpoints` | one worst path per failing endpoint (`-nworst 1 -unique_pins`); TNS is their sum |
+| `wns`, `tns`, `failing_endpoints` | the **Design Timing Summary** row of `report_timing_summary` — Vivado's own published figures |
 | `dsp`, `carry4` | post-route cell count, `REF_NAME =~ DSP48*` / `CARRY4*` |
 | `lut` | **`Slice LUTs`** from `report_utilization` — sites, after LUT combining |
 | `bram` | Block RAM Tiles: `RAMB36* + 0.5 × RAMB18*` |
 
-`lut` is the one column where the choice is not obvious. `Slice LUTs` (8862 at
-`82276de`) counts *sites* and so is what actually competes for the device; the
-raw `LUTn` primitive count for the same netlist is 9159, because a combined LUT
-pair occupies one site but is two cells. **The pre-harness figure of 8947 quoted
-for this design in `docs/handoff.md` is neither**, and does not appear anywhere
-in that build's post-route report — it was measured at some other point in the
-flow, and how is no longer recoverable. That is the whole argument for this file:
-compare rows against rows, and treat any resource figure not in
+Two of these were chosen the wrong way first, and both mistakes are instructive.
+
+**TNS** was originally summed in Tcl from the per-endpoint path objects. That is
+the textbook definition of TNS and it came out 0.032 ns from Vivado's own figure
+over 1852 endpoints, because the per-path slacks are already rounded to three
+decimals. A harness whose numbers are *almost* the tool's is worse than one that
+simply reads the tool's, so it reads the tool's.
+
+**LUT** is `Slice LUTs`, which counts sites and so is what actually competes for
+the device. The raw `LUTn` primitive count for the same netlist is 9159 — a
+combined LUT pair is one site but two cells. Do not mix the two.
+
+### The first row is 8862 LUT, and issue #20 asked for 8947
+
+Not a discrepancy in the harness. Issue #20's expected row was assembled from two
+different builds:
+
+- `sim/util_impl.rpt`, 21:28 — **8947** Slice LUTs, built *before* commit
+  `44cb724`, which changed `hdl/axis_oct32_encode.sv` and `hdl/ggx_latency_pkg.sv`.
+- `sim/timing_summary_impl.rpt`, 22:00 — WNS −1.330, TNS −406.686, 1852 failing
+  endpoints, built *after* it.
+
+The harness's single coherent run of the post-fix netlist reproduces the timing
+figures and every other resource count exactly (79 DSP, 4.5 BRAM, 1302 CARRY4)
+and measures 8862 LUT, twice, on two independent runs. The 85-LUT gap is the
+encoder fix, attributed to the wrong build by a hand-assembled row.
+
+This is the failure the harness was built to end, caught on its own first row.
+Compare rows against rows; treat any resource figure not in
 `timing_history.csv` as unsourced.
 
 ### If a row looks impossibly good

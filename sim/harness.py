@@ -36,6 +36,7 @@ import sys
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 SIM_DIR = Path(__file__).resolve().parent
 PROJ_DIR = SIM_DIR.parent
@@ -55,10 +56,13 @@ DONE_SENTINEL = "HARNESS_PNR_DONE"
 #: plausible WNS for a design missing a whole LUT. Never record such a run.
 READMEM_FAILURE = "could not open $readmem data file"
 
-#: $readmemh'd by the RTL under a bare filename, so it resolves against whatever
-#: directory Vivado was launched in. Staged into the run directory rather than
-#: running from sim/, so a run's reports stay with the run.
-ROMS = ("ggx_trig_rom.mem",)
+#: The RTL $readmemh's its ROMs under bare filenames, which resolve against
+#: whatever directory Vivado was launched in. Every .mem in sim/ is staged into
+#: the run directory -- runs get their own directory so their reports stay with
+#: them, which would otherwise put the ROMs out of reach. Which ROMs the build
+#: actually requires is asserted by harness_pnr.tcl, where the CWD is; naming
+#: them here as well would just be a second list to forget to update.
+ROM_GLOB = "*.mem"
 
 #: key -> parser. Order is the column order in the history file.
 METRICS = {
@@ -158,15 +162,15 @@ def dsp_deviation(prev: Row | None, new: Row) -> str | None:
     )
 
 
-def append_row(path: Path, row: Row, allow_dsp_change: bool = False) -> str | None:
+def append_row(path: Path, row: Row) -> str | None:
     """Append `row`, refusing an unexplained DSP change. Returns the deviation note."""
     path = Path(path)
     rows = read_rows(path)
     deviation = dsp_deviation(rows[-1] if rows else None, row)
-    if deviation and not row.note and not allow_dsp_change:
+    if deviation and not row.note:
         raise HarnessError(
             f"{deviation}\nRefusing to record it unexplained: re-run with "
-            f"--note 'why the DSP count moved' (or --allow-dsp-change)."
+            f"--note 'why the DSP count moved'."
         )
 
     new_file = not path.exists()
@@ -181,6 +185,19 @@ def append_row(path: Path, row: Row, allow_dsp_change: bool = False) -> str | No
 
 # ------------------------------------------------------------ Oct32 baseline
 
+class Sample(NamedTuple):
+    """One Sample as it left the Lane. The unit the baseline is a list of.
+
+    `word` is the Oct32 output word verbatim, not a decoded direction: what
+    "bit-identical" claims is that the same bits reached the stream.
+    """
+
+    burst: int
+    idx: int
+    word: int
+    last: int
+
+
 #: One Sample per line: burst index, index within the Burst, the Oct32 word as
 #: emitted, TLAST. Nothing else -- no wall-clock time, no simulation time, no
 #: path, no tool version. That is deliberate: it makes plain `diff` a complete
@@ -189,8 +206,9 @@ BASELINE_HEADER = """\
 # test_ggx_control Oct32 output baseline.
 #
 # One line per Sample:  <burst> <sample_idx> <oct32_hex> <tlast>
-# The Oct32 word is exactly what the Lane put on the output stream: low 16 bits
-# the first field, high 16 the second (ADR-0001).
+# The Oct32 word is exactly what the Lane put on the output stream. ADR-0001
+# fixes the encoding and its 2x16-bit width; the field ORDER is
+# {field_w, field_u}, from hdl/axis_oct32_encode.sv.
 #
 # Captured and compared with:  python sim/harness.py baseline capture|check
 # Contains no timestamp, no simulation time and no absolute path by design, so
@@ -198,14 +216,16 @@ BASELINE_HEADER = """\
 """
 
 
-def render_baseline(samples) -> str:
-    lines = [BASELINE_HEADER]
+def render_baseline(samples, header: bool = True) -> str:
+    """The one place the baseline's line format is written. Both the file and
+    test_ggx_control's dump go through here, so they cannot drift apart."""
+    lines = [BASELINE_HEADER] if header else []
     for burst, idx, word, last in samples:
         lines.append(f"{burst} {idx} {word:08x} {last}\n")
     return "".join(lines)
 
 
-def parse_baseline(text: str) -> list[tuple[int, int, int, int]]:
+def parse_baseline(text: str) -> list[Sample]:
     out = []
     for lineno, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
@@ -215,7 +235,7 @@ def parse_baseline(text: str) -> list[tuple[int, int, int, int]]:
         if len(parts) != 4:
             raise HarnessError(f"baseline line {lineno} is malformed: {line!r}")
         burst, idx, word, last = parts
-        out.append((int(burst), int(idx), int(word, 16), int(last)))
+        out.append(Sample(int(burst), int(idx), int(word, 16), int(last)))
     return out
 
 
@@ -280,11 +300,11 @@ def _check_sources_current():
 def run_pnr(run_dir: Path) -> str:
     """Run the P&R flow with `run_dir` as CWD, so Vivado's reports land there."""
     run_dir.mkdir(parents=True, exist_ok=True)
-    for rom in ROMS:
-        src = SIM_DIR / rom
-        if not src.exists():
-            raise HarnessError(f"missing {src} -- run: python sim/gen_roms.py")
-        (run_dir / rom).write_bytes(src.read_bytes())
+    roms = sorted(SIM_DIR.glob(ROM_GLOB))
+    if not roms:
+        raise HarnessError(f"no {ROM_GLOB} in {SIM_DIR} -- run: python sim/gen_roms.py")
+    for rom in roms:
+        (run_dir / rom.name).write_bytes(rom.read_bytes())
     log_path = run_dir / "pnr.log"
     print(f"[harness] place-and-route running (~10 min); log: {log_path}")
     with open(log_path, "w") as log:
@@ -299,7 +319,7 @@ def cmd_pnr(args) -> int:
     _check_sources_current()
     commit, dirty = git_state()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log_text = run_pnr(Path(args.run_dir) if args.run_dir else RUNS_DIR / f"{stamp}-{commit}")
+    log_text = run_pnr(RUNS_DIR / f"{stamp}-{commit}")
 
     metrics = parse_metrics(log_text)
     row = Row(
@@ -310,7 +330,7 @@ def cmd_pnr(args) -> int:
         **metrics,
     )
 
-    deviation = append_row(HISTORY_PATH, row, allow_dsp_change=args.allow_dsp_change)
+    deviation = append_row(HISTORY_PATH, row)
 
     print(f"\n[harness] recorded in {HISTORY_PATH.relative_to(PROJ_DIR)}:")
     print(f"  commit  {row.commit}{' (DIRTY TREE)' if row.dirty else ''}")
@@ -325,7 +345,7 @@ def cmd_pnr(args) -> int:
     return 0
 
 
-def capture_oct32(dump_path: Path) -> list[tuple[int, int, int, int]]:
+def capture_oct32(dump_path: Path) -> list[Sample]:
     """Run test_ggx_control and return the Oct32 stream it observed.
 
     The test writes the dump itself (GGX_OCT32_DUMP), because the output stream
@@ -384,9 +404,6 @@ def main(argv=None) -> int:
 
     pnr = sub.add_parser("pnr", help="place-and-route and append a row to the history")
     pnr.add_argument("--note", default="", help="why this run's resources moved")
-    pnr.add_argument("--allow-dsp-change", action="store_true",
-                     help="record a DSP change with no note (prefer --note)")
-    pnr.add_argument("--run-dir", default="", help="where Vivado's reports land")
     pnr.set_defaults(func=cmd_pnr)
 
     bl = sub.add_parser("baseline", help="capture or check the Oct32 output baseline")
