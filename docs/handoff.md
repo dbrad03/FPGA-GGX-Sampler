@@ -79,9 +79,18 @@ congestion (`normalize_warped_view` = 2184 failing endpoints @ 85% route).
   arrives — never that the u1/u2 sequence is correct. `control_ref_sequence` (the true end-to-end model)
   is defined in the file but **never called**. Only `test_integration_dual` scoreboards the sampler
   output per-index.
+  **RESOLVED 2026-07-31 (issue #5):** `control_ref_sequence` is now wired into `test_ggx_control` as a
+  second, independent Stream-integrity gate, built offline from the Command list with no DUT signal
+  contributing, and demonstrated to FAIL on a ±1 scramble sideband perturbation while the Bias gate
+  still passes. Note it was not merely unused — it was **wrong**: it scrambled the sobol *index*,
+  which the RTL does not do, putting it O(1) away from the hardware. `test_ggx_control` can now see
+  the whole Lane.
 - **P&R impact (OOC, 5 ns, no phys_opt):** WNS −1.344 → −1.454 (staircase — see below), but
   TNS −1176 → −569 (−52%), failing eps 4069 → 2265 (−44%), CARRY4 2862 → 1772 (−38%), `u_basis`
   26591 cells (6 regions) → 15785 (2 regions, un-smeared). A structural/congestion/area win.
+  **STALE — these figures no longer reproduce; see "Timing re-baseline" below.** They describe a
+  25925-FF intermediate tree; the committed design is 18290 FF. The structural/congestion argument
+  still holds, the numbers do not.
 
 ## Sampler TDATA/TVALID skew (found + fixed 2026-07-31)
 The pipeline rewrites left the sideband taps deeper than the data paths, and the *module* tests then
@@ -94,24 +103,72 @@ codified the skew as a "characterised offset" instead of failing on it:
   cross-burst leakage. Fix: `SIDEBAND_DEPTH` 14 → 18 (both paths 19).
 - Both `VALID_DATA_OFFSET` constants pinned to **0**. On `main` both blocks were aligned (10/10 and 7/7)
   — the "offset the system co-tunes around" never existed; it was a regression, not a design property.
-- **Lesson:** a passing `test_ggx_control` is NOT evidence the sampler is correct. Always run
-  `test_integration_dual` in the cascade.
+- **Lesson:** a passing `test_ggx_control` was NOT evidence the sampler is correct. Still run
+  `test_integration_dual` in the cascade — but as of issue #5 `test_ggx_control` carries its own
+  Stream-integrity gate and would now catch this skew class itself. A ±1 perturbation of
+  `SCRAMBLE_SIDEBAND_DEPTH` also fails the **build** now, via the elaboration checks from issue #10.
 
 ## What's VERIFIED vs LEFT
 - **Verified:** entire cascade bit-identical after the fold. Accuracy gate held at every step.
-- **State:** working tree being committed (fold + folded.sv + tests). Prior width-de-inflation
-  experiment reverted (reproject back to HEAD, event_basis fold-only).
-- **WNS now −1.454; new walls (the staircase):**
-  1. **WNS holder −1.454, 72% ROUTE (per-sample):** `u_skid_proj` FIFO read → `u_reproject_normalize`
-     Q2.62 square DSP. reproject is now the biggest block (19684 cells) smeared across 4 regions.
-     → **FLOORPLAN target.** A Vivado project is ready: `vivado/ggx_floorplan/ggx_floorplan.xpr`
-     (OOC, 5 ns, fold included, synthesized). See `vivado/FLOORPLAN_GUIDE.md`. Pin reproject (+ its
-     skid) into X1Y1+X1Y2 so that read stops crossing the die.
-  2. **−1.235, LOGIC-bound (per-burst):** `u_basis` t2a/t2b band (CARRY4=5 from the wide t1b shift).
-     Floorplan won't help this one — needs pipelining (or fold the t2a/t2b math, since it's per-burst).
+- **State (2026-07-31):** fold committed. Since then, workstreams A and B are done — the
+  Stream-integrity gate (#1/#5) and the latency package as law (#2, #6–#10). Full suite 19/19 green;
+  `test_ggx_control` byte-identical to its pre-refactor baseline throughout, and post-route
+  netlist-equivalent (see re-baseline below). Next in the chain is workstream C (#3, #11/#12), the
+  event_basis elastic-handshake rebuild — **not started.**
+- **WNS is −2.078, not −1.454 — see "Timing re-baseline" below before planning against it.**
 - **Then:** Phase 2 = real bitstream + Zybo bring-up (NO `create_bd.tcl` exists — the tracked
   `vivado/design_1_wrapper.bit` is the OLD pre-refactor design; reuse the `timing-recovery-loop`
   repo's `create_bd.tcl` + PYNQ Overlay pattern). Phase 3 = 5-lane resource-vector bin-pack.
+
+## Timing re-baseline (2026-07-31, Vivado 2025.1)
+
+The **−1.454 figure above does not reproduce.** Measured today with `sim/impl_breakdown.tcl`
+(OOC, xc7z020clg400-1, 5 ns, no phys_opt):
+
+| | documented (stale) | measured 2026-07-31 |
+|---|---|---|
+| WNS | −1.454 | **−2.078** |
+| TNS | −569 | **−1653.089** |
+| Failing endpoints | 2265 | **5929** |
+| Total endpoints | 64989 | **49028** |
+| Slice registers | 25925 | **18290** |
+| LUTs / DSP / BRAM | — | 9296 / 85 / 4.5 |
+| CARRY4 | 1772 | **1352** |
+
+**This is not a regression from the latency-package work.** The same script was run on `e4dfd50`
+(the commit before that work) and on the current tree: `timing_summary_impl.rpt` and
+`viol_breakdown.rpt` come out **byte-identical**, WNS −2.078 on both. The package refactor is
+netlist-equivalent post-route, which is stronger evidence than the bit-identical simulation output.
+
+The stale numbers came from `sim/*_fold.rpt` / `*_baseline.rpt`, saved 07-27 17:15–17:21 — three days
+*before* the fold was committed (09ffccb, 07-30 18:02). They describe a 25925-FF intermediate tree,
+not what is committed. Endpoint count alone (64989 vs 49028) shows it is a different design.
+
+**Two traps that make bad timing numbers look plausible — both now fixed, both worth knowing:**
+- `sim/ggx_trig_rom.mem` is gitignored, and Vivado does **not** error on a missing `$readmem` file. It
+  warns, leaves the ROM uninitialized, constant-folds the whole trig LUT away, and reports timing for
+  a design 12 DSPs and 2.5 BRAMs lighter. Run `python sim/gen_roms.py` first; `rtl_sources.tcl` now
+  aborts if the file is absent.
+- 5 of the 8 Tcl scripts were missing `axis_fixed_inv_sqrt_folded.sv` and had failed synthesis
+  outright since the fold. All 8 now take their file list from `sim/sources.py`.
+
+### The staircase, re-measured
+The top five violating paths are now **all per-burst `u_basis` t1b→t2 DSP paths**, which inverts the
+old priority — the reproject floorplan was wall #1, and is not the binder any more:
+
+1. **−2.078 (per-burst):** `u_basis/t1b_x_shift_reg[32]` → `u_basis/t2b_y_r_reg` (DSP48E1 A port).
+   8 logic levels, CARRY4=5, logic 2.209 ns (42%) / route 3.029 ns (58%).
+2. **−1.887 (per-burst):** `t1b_y_shift_reg[32]` → `t2a_x_reg` / `t2a_z0_reg`.
+3. **−1.430 (per-burst):** `t1b_x_shift_reg[32]` → `t2b_z_r_reg/D[16]`.
+4. **−1.419 (per-sample):** `u_reproject_normalize` `meta0_wr_ptr` → `meta0_data` RAM write address.
+
+`u_reproject_normalize/u_norm_h` still dominates **TNS** (2056 failing endpoints at −1.200), so
+reproject is the bulk-of-violations problem while `u_basis` holds WNS.
+
+**Why this is good news:** the WNS holder is **per-burst** work, where latency is nearly free per
+`CONTEXT.md`. Pipelining or folding the t2a/t2b band costs throughput nothing, and is a far cheaper
+lever than floorplanning the per-sample reproject datapath. The old wall #2 note said exactly this;
+it is now wall #1.
 
 ## How to measure / verify
 - **Tests** (from `sim/`, `.venv`, cocotb 1.9.2): `python test_<name>.py`. Cascade after any RTL change:
@@ -123,3 +180,9 @@ codified the skew as a "characterised offset" instead of failing on it:
   **no phys_opt** — it's ineffective above −0.5 ns here). OOC *synth* timing is badly optimistic on
   this design — always trust post-route. Reports land in `sim/timing_summary_impl.rpt`,
   `viol_breakdown.rpt`, `phase0_logic_vs_route.rpt`. (These + checkpoints are gitignored; regenerate.)
+  **Run `python sim/gen_roms.py` first** — see the ROM trap under "Timing re-baseline". All 8 Tcl
+  scripts now source `sim/rtl_sources.tcl`, generated from `sim/sources.py`; after adding or renaming
+  an RTL file run `python sim/sources.py --emit-tcl` (`--check-tcl` verifies it is current).
+- **Comparing two trees:** always diff endpoint counts and DSP/FF/BRAM as well as WNS. A silently
+  degenerate build (missing ROM, missing source file) reports a perfectly plausible WNS; the resource
+  counts are what give it away.
