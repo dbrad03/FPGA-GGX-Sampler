@@ -103,9 +103,19 @@ module axis_pre_ggx_sampler #(
     wire hash1_v, hash1_l, sobol1_v;
     
     // Internal Backpressure Wires
-    // These connect Scrambler INPUT READY to Hash/Sobol OUTPUT READY
-    wire scram0_in_ready; 
+    // These are the scramblers' INPUT ready. They used to be wired straight to
+    // the Hash/Sobol OUTPUT ready, which put the scramblers' stall one LUT away
+    // from every hash DSP's clock enable -- and, through the hash, one more LUT
+    // away from this block's own upstream. Combined with projected_area's chain
+    // that was 875 of the design's 1852 failing endpoints on one net structure
+    // (issue #31). Each scrambler now sits behind a registered-ready cut, so
+    // these nets stop at a FIFO instead of reaching back into the hash.
+    wire scram0_in_ready;
     wire scram1_in_ready;
+
+    // Registered ready out of each cut FIFO: what hash/sobol actually see.
+    wire join0_in_ready;
+    wire join1_in_ready;
 
     // --- DIMENSION 0 ---
     axis_hash_combine_2d   #(.DIMENSION(0)) hash0  (
@@ -113,8 +123,8 @@ module axis_pre_ggx_sampler #(
         .s00_axis_tdata(hash_in_data), .s00_axis_tvalid(samp_tvalid), 
         .s00_axis_tlast(samp_tlast),   .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(samp_tready), // Controls upstream Sampler
         .m00_axis_aclk(m00_axis_aclk), .m00_axis_aresetn(m00_axis_aresetn), 
-        .m00_axis_tdata(hash0_out),    .m00_axis_tvalid(hash0_v), 
-        .m00_axis_tlast(hash0_l),      .m00_axis_tstrb(), .m00_axis_tready(scram0_in_ready)
+        .m00_axis_tdata(hash0_out),    .m00_axis_tvalid(hash0_v),
+        .m00_axis_tlast(hash0_l),      .m00_axis_tstrb(), .m00_axis_tready(join0_in_ready)
     );
 
     axis_sobol2d_stateless #(.DIMENSION(0)) sobol0 (
@@ -122,18 +132,39 @@ module axis_pre_ggx_sampler #(
         .s00_axis_tdata(sobol_in_data), .s00_axis_tvalid(sobol_in_valid), 
         .s00_axis_tlast(sobol_in_last), .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(),
         .m00_axis_aclk(m00_axis_aclk),  .m00_axis_aresetn(m00_axis_aresetn), 
-        .m00_axis_tdata(sobol0_out),    .m00_axis_tvalid(sobol0_v), 
-        .m00_axis_tlast(),              .m00_axis_tstrb(), .m00_axis_tready(scram0_in_ready)
+        .m00_axis_tdata(sobol0_out),    .m00_axis_tvalid(sobol0_v),
+        .m00_axis_tlast(),              .m00_axis_tstrb(), .m00_axis_tready(join0_in_ready)
     );
-    
-    wire [63:0] scram0_in = {hash0_out[31:0], sobol0_out[31:0]};
-    wire scram0_v = hash0_v && sobol0_v;
+
+    // Cut FIFO on the joined {hash, sobol} pair. It sits AFTER the join, so both
+    // paths are delayed by the same cycle and HASH_LATENCY/SOBOL_LATENCY -- and
+    // therefore ALIGN_DELAY above -- are untouched. One FIFO per dimension
+    // rather than one shared: a shared registered ready would drive both
+    // dimensions' hash enables, ~1400 loads on a single net, which is the
+    // fanout problem this ticket is also about.
+    wire [63:0] scram0_in;
+    wire scram0_v, scram0_l;
+
+    axis_fifo_2deep #(
+        .DATA_WIDTH(64)
+    ) u_join0 (
+        .clk(s00_axis_aclk), .resetn(s00_axis_aresetn),
+        .s_axis_tvalid(hash0_v && sobol0_v),
+        .s_axis_tready(join0_in_ready),
+        .s_axis_tdata({hash0_out[31:0], sobol0_out[31:0]}),
+        .s_axis_tlast(hash0_l),
+        .m_axis_tvalid(scram0_v),
+        .m_axis_tready(scram0_in_ready),
+        .m_axis_tdata(scram0_in),
+        .m_axis_tlast(scram0_l)
+    );
+
     wire scram0_out_v, scram0_out_l;
 
     axis_nested_uniform_scramble scram0 (
-        .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn), 
-        .s00_axis_tdata(scram0_in),    .s00_axis_tvalid(scram0_v), 
-        .s00_axis_tlast(hash0_l),      .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(scram0_in_ready), // Driving upstream
+        .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn),
+        .s00_axis_tdata(scram0_in),    .s00_axis_tvalid(scram0_v),
+        .s00_axis_tlast(scram0_l),     .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(scram0_in_ready), // Driving upstream
         .m00_axis_aclk(m00_axis_aclk), .m00_axis_aresetn(m00_axis_aresetn), 
         .m00_axis_tdata(scram0_out),   .m00_axis_tvalid(scram0_out_v), 
         .m00_axis_tlast(scram0_out_l), .m00_axis_tready(m00_axis_tready),
@@ -146,8 +177,8 @@ module axis_pre_ggx_sampler #(
         .s00_axis_tdata(hash_in_data), .s00_axis_tvalid(samp_tvalid), 
         .s00_axis_tlast(samp_tlast),   .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(),
         .m00_axis_aclk(m00_axis_aclk), .m00_axis_aresetn(m00_axis_aresetn), 
-        .m00_axis_tdata(hash1_out),    .m00_axis_tvalid(hash1_v), 
-        .m00_axis_tlast(hash1_l),      .m00_axis_tstrb(), .m00_axis_tready(scram1_in_ready)
+        .m00_axis_tdata(hash1_out),    .m00_axis_tvalid(hash1_v),
+        .m00_axis_tlast(hash1_l),      .m00_axis_tstrb(), .m00_axis_tready(join1_in_ready)
     );
 
     axis_sobol2d_stateless #(.DIMENSION(1)) sobol1 (
@@ -155,18 +186,33 @@ module axis_pre_ggx_sampler #(
         .s00_axis_tdata(sobol_in_data), .s00_axis_tvalid(sobol_in_valid), 
         .s00_axis_tlast(sobol_in_last), .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(), 
         .m00_axis_aclk(m00_axis_aclk),  .m00_axis_aresetn(m00_axis_aresetn), 
-        .m00_axis_tdata(sobol1_out),    .m00_axis_tvalid(sobol1_v), 
-        .m00_axis_tlast(),              .m00_axis_tstrb(), .m00_axis_tready(scram1_in_ready)
+        .m00_axis_tdata(sobol1_out),    .m00_axis_tvalid(sobol1_v),
+        .m00_axis_tlast(),              .m00_axis_tstrb(), .m00_axis_tready(join1_in_ready)
     );
 
-    wire [63:0] scram1_in = {hash1_out[31:0], sobol1_out[31:0]};
-    wire scram1_v = hash1_v && sobol1_v;
+    wire [63:0] scram1_in;
+    wire scram1_v, scram1_l;
+
+    axis_fifo_2deep #(
+        .DATA_WIDTH(64)
+    ) u_join1 (
+        .clk(s00_axis_aclk), .resetn(s00_axis_aresetn),
+        .s_axis_tvalid(hash1_v && sobol1_v),
+        .s_axis_tready(join1_in_ready),
+        .s_axis_tdata({hash1_out[31:0], sobol1_out[31:0]}),
+        .s_axis_tlast(hash1_l),
+        .m_axis_tvalid(scram1_v),
+        .m_axis_tready(scram1_in_ready),
+        .m_axis_tdata(scram1_in),
+        .m_axis_tlast(scram1_l)
+    );
+
     wire scram1_out_v;
 
     axis_nested_uniform_scramble scram1 (
-        .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn), 
-        .s00_axis_tdata(scram1_in),    .s00_axis_tvalid(scram1_v), 
-        .s00_axis_tlast(hash1_l),      .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(scram1_in_ready), 
+        .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn),
+        .s00_axis_tdata(scram1_in),    .s00_axis_tvalid(scram1_v),
+        .s00_axis_tlast(scram1_l),     .s00_axis_tstrb(AXIS_STRB_ALL), .s00_axis_tready(scram1_in_ready),
         .m00_axis_aclk(m00_axis_aclk), .m00_axis_aresetn(m00_axis_aresetn), 
         .m00_axis_tdata(scram1_out),   .m00_axis_tvalid(scram1_out_v), 
         .m00_axis_tlast(),             .m00_axis_tready(m00_axis_tready),

@@ -29,6 +29,11 @@ set RTL_SOURCES(axis_cordic_normalize) [list \
   $_rtl_dir/axis_cordic_normalize.sv \
 ]
 
+set RTL_SOURCES(axis_fifo_2deep) [list \
+  $_rtl_dir/ggx_latency_pkg.sv \
+  $_rtl_dir/axis_fifo_2deep.sv \
+]
+
 set RTL_SOURCES(axis_fixed_div) [list \
   $_rtl_dir/ggx_latency_pkg.sv \
   $_rtl_dir/axis_fixed_div.sv \
@@ -99,6 +104,7 @@ set RTL_SOURCES(axis_ggx_event_basis) [list \
 set RTL_SOURCES(axis_ggx_projected_area) [list \
   $_rtl_dir/ggx_latency_pkg.sv \
   $_rtl_dir/axis_ggx_projected_area.sv \
+  $_rtl_dir/axis_fifo_2deep.sv \
   $_rtl_dir/axis_fixed_sqrt.sv \
   $_rtl_dir/axis_trig_lut.sv \
 ]
@@ -134,6 +140,7 @@ set RTL_SOURCES(axis_oct32_encode) [list \
 set RTL_SOURCES(axis_pre_ggx_sampler) [list \
   $_rtl_dir/ggx_latency_pkg.sv \
   $_rtl_dir/axis_pre_ggx_sampler.v \
+  $_rtl_dir/axis_fifo_2deep.sv \
   $_rtl_dir/axis_top_lvl_sampler.sv \
   $_rtl_dir/axis_sobol2d_stateless.sv \
   $_rtl_dir/axis_hash_combine_2d.sv \

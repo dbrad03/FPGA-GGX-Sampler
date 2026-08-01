@@ -38,6 +38,11 @@ module axis_ggx_projected_area #
       ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::SQRT_LATENCY_INST);      // 27
   localparam int TRIG_META_MIN_DEPTH =
       ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::TRIG_LUT_LATENCY);       // 4
+  // meta2 is pushed at the INPUT of the sqrt_t cut FIFO and popped at sqrt_t's
+  // output, so it spans the FIFO as well as the core. See issue #31.
+  localparam int SQRT_T_META_MIN_DEPTH =
+      ggx_latency_pkg::elastic_min_depth(
+          ggx_latency_pkg::fifo_2deep_span(ggx_latency_pkg::SQRT_LATENCY_INST));   // 30
   localparam int SQRT_META_DEPTH = 256;
   localparam int TRIG_META_DEPTH = 256;
   localparam int SQRT_META_AW = $clog2(SQRT_META_DEPTH);
@@ -47,6 +52,9 @@ module axis_ggx_projected_area #
     if (SQRT_META_DEPTH < SQRT_META_MIN_DEPTH)
       $fatal(1, "axis_ggx_projected_area: SQRT_META_DEPTH=%0d is below the %0d entries needed to span the sqrt latency of %0d",
              SQRT_META_DEPTH, SQRT_META_MIN_DEPTH, ggx_latency_pkg::SQRT_LATENCY_INST);
+    if (SQRT_META_DEPTH < SQRT_T_META_MIN_DEPTH)
+      $fatal(1, "axis_ggx_projected_area: SQRT_META_DEPTH=%0d is below the %0d entries meta2 needs to span the sqrt_t cut FIFO plus the sqrt latency of %0d",
+             SQRT_META_DEPTH, SQRT_T_META_MIN_DEPTH, ggx_latency_pkg::SQRT_LATENCY_INST);
     if (TRIG_META_DEPTH < TRIG_META_MIN_DEPTH)
       $fatal(1, "axis_ggx_projected_area: TRIG_META_DEPTH=%0d is below the %0d entries needed to span the trig_lut latency of %0d",
              TRIG_META_DEPTH, TRIG_META_MIN_DEPTH, ggx_latency_pkg::TRIG_LUT_LATENCY);
@@ -56,9 +64,42 @@ module axis_ggx_projected_area #
   localparam logic signed [31:0] ONE_Q1     = 32'sh7FFF_FFFF;
   localparam logic signed [31:0] NEG_ONE_Q1 = 32'sh8000_0000;
 
-  wire [31:0] in_u1_uq032 = s00_axis_tdata[31:0];
-  wire [31:0] in_u2_uq032 = s00_axis_tdata[63:32];
-  wire signed [31:0] in_vhz_q131 = $signed(s00_axis_tdata[95:64]);
+  // --------------------------------------------------------------------------
+  // Input cut (issue #31).
+  //
+  // Without this, s00_axis_tready is sqrt_r's pipe_en, which is a LUT away from
+  // trig's, which is a LUT away from sqrt_t's, which is a LUT away from
+  // d1b_valid_reg -- and the whole chain then continued OUT of this block, into
+  // the sampler, and on to a fanout-704 net driving DSP48 clock-enable pins.
+  // That single combinational chain carried 875 of the design's 1852 failing
+  // endpoints and 43% of its TNS. Registering the ready here stops it at this
+  // block's boundary; the sampler's own cut is in axis_pre_ggx_sampler.
+  // --------------------------------------------------------------------------
+  wire        sqrt_r_in_ready;  // sqrt_r's own pipe_en; stops here, at the cut
+  wire        in_fifo_valid;
+  wire        in_fifo_last;
+  wire [95:0] in_fifo_data;
+  wire        in_fifo_ready;   // registered, so the sampler never sees this block's stall
+  assign s00_axis_tready = in_fifo_ready;
+
+  axis_fifo_2deep #(
+    .DATA_WIDTH(96)
+  ) u_in_fifo (
+    .clk(s00_axis_aclk),
+    .resetn(s00_axis_aresetn),
+    .s_axis_tvalid(s00_axis_tvalid),
+    .s_axis_tready(in_fifo_ready),
+    .s_axis_tdata(s00_axis_tdata),
+    .s_axis_tlast(s00_axis_tlast),
+    .m_axis_tvalid(in_fifo_valid),
+    .m_axis_tready(sqrt_r_in_ready),
+    .m_axis_tdata(in_fifo_data),
+    .m_axis_tlast(in_fifo_last)
+  );
+
+  wire [31:0] in_u1_uq032 = in_fifo_data[31:0];
+  wire [31:0] in_u2_uq032 = in_fifo_data[63:32];
+  wire signed [31:0] in_vhz_q131 = $signed(in_fifo_data[95:64]);
 
   function automatic logic signed [31:0] satq131(input logic signed [63:0] val);
     begin
@@ -117,7 +158,6 @@ module axis_ggx_projected_area #
   // --------------------------------------------------------------------------
   // Stage A: r = sqrt(u1)
   // --------------------------------------------------------------------------
-  wire sqrt_r_in_ready;
   wire sqrt_r_out_valid;
   wire [31:0] sqrt_r_out_uq032;
   logic sqrt_r_out_ready;
@@ -129,7 +169,7 @@ module axis_ggx_projected_area #
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
-    .s00_axis_tvalid(s00_axis_tvalid),
+    .s00_axis_tvalid(in_fifo_valid),
     .s00_axis_tdata(in_u1_uq032),
     .s00_axis_tstrb('1),
     .s00_axis_tready(sqrt_r_in_ready),
@@ -143,8 +183,7 @@ module axis_ggx_projected_area #
     .m00_axis_tstrb()
   );
 
-  assign s00_axis_tready = sqrt_r_in_ready;
-  wire sqrt_r_in_fire = s00_axis_tvalid && sqrt_r_in_ready;
+  wire sqrt_r_in_fire = in_fifo_valid && sqrt_r_in_ready;
   wire sqrt_r_out_fire;
 
   // Align u2/Vh.z/TLAST with sqrt(u1).
@@ -166,7 +205,7 @@ module axis_ggx_projected_area #
       if (sqrt_r_in_fire) begin
         meta0_u2[meta0_wr_ptr] <= in_u2_uq032;
         meta0_vhz[meta0_wr_ptr] <= in_vhz_q131;
-        meta0_last[meta0_wr_ptr] <= s00_axis_tlast;
+        meta0_last[meta0_wr_ptr] <= in_fifo_last;
         meta0_wr_ptr <= meta0_wr_ptr + 1'b1;
       end
       if (sqrt_r_out_fire) begin
@@ -231,8 +270,12 @@ module axis_ggx_projected_area #
   logic signed [31:0] c0_t1_q131, c0_t2_q131, c0_vhz_q131;
   logic signed [41:0] c0_t1_sq_q240;   // t1^2, Q2.40 (was Q2.62 with 22 dead low bits)
 
+  // sqrt_t's own ready (its pipe_en) now terminates at the cut FIFO below, so
+  // the C/D stages stall against a flip-flop rather than against sqrt_t's
+  // enable net. See issue #31.
   wire sqrt_t_in_ready;
-  wire c0_to_sqrt2 = c0_valid && sqrt_t_in_ready;
+  wire sqrt_t_fifo_ready;
+  wire c0_to_sqrt2 = c0_valid && sqrt_t_fifo_ready;
   wire c0_ready = !c0_valid || c0_to_sqrt2;
   wire s2_to_c0 = s2_valid && c0_ready;
   wire s2_ready = !s2_valid || s2_to_c0;
@@ -355,6 +398,27 @@ module axis_ggx_projected_area #
 
   wire out_pipe_en = m00_axis_tready || !m00_axis_tvalid;
 
+  // Cut FIFO ahead of sqrt_t. meta2 is keyed on c0_to_sqrt2 -- the FIFO's INPUT
+  // fire -- so it still counts every beat between here and sqrt_t's output, and
+  // SQRT_T_META_MIN_DEPTH above covers the FIFO's own occupancy.
+  wire        sqrt_t_fifo_valid;
+  wire [31:0] sqrt_t_fifo_arg_uq032;
+
+  axis_fifo_2deep #(
+    .DATA_WIDTH(32)
+  ) u_sqrt_t_fifo (
+    .clk(s00_axis_aclk),
+    .resetn(s00_axis_aresetn),
+    .s_axis_tvalid(c0_valid),
+    .s_axis_tready(sqrt_t_fifo_ready),
+    .s_axis_tdata(sqrt_t_arg_uq032),
+    .s_axis_tlast(1'b0),
+    .m_axis_tvalid(sqrt_t_fifo_valid),
+    .m_axis_tready(sqrt_t_in_ready),
+    .m_axis_tdata(sqrt_t_fifo_arg_uq032),
+    .m_axis_tlast()
+  );
+
   axis_fixed_sqrt #(
     .FRAC_BITS(FRAC_BITS),
     .SIG_BITS(24)
@@ -362,8 +426,8 @@ module axis_ggx_projected_area #
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
-    .s00_axis_tvalid(c0_valid),
-    .s00_axis_tdata(sqrt_t_arg_uq032),
+    .s00_axis_tvalid(sqrt_t_fifo_valid),
+    .s00_axis_tdata(sqrt_t_fifo_arg_uq032),
     .s00_axis_tstrb('1),
     .s00_axis_tready(sqrt_t_in_ready),
 

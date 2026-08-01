@@ -52,6 +52,20 @@ The output encoding: a direction projected onto an octahedron and stored as two 
 Scale-invariant, so it does not require its input to be unit length.
 _Avoid_: Oct16, octahedral compression, packed normal
 
+## Backpressure
+
+**Ready chain**:
+A `tready` that propagates backwards through several cores inside one clock cycle, because each core
+derives its input ready combinationally from its output ready. Its cost is fanout and route, not
+logic — each hop drives every clock enable in the core it crosses.
+_Avoid_: Backpressure path, stall path, combinational loop
+
+**Cut**:
+A registered-ready elastic buffer placed in a Ready chain so that a stall stops at a flip-flop and
+resumes from it next cycle. Costs one cycle of latency and holds two beats, so a ready that is one
+cycle late is still lossless. See ADR-0003.
+_Avoid_: Skid buffer (that is one specific primitive), pipeline register, break
+
 ## Verification
 
 **Bias gate**:

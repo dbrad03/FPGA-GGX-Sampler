@@ -126,6 +126,27 @@ package ggx_latency_pkg;
     return spanned_latency + 1;
   endfunction
 
+  // axis_fifo_2deep, used throughout as a REGISTERED-READY cut in a
+  // backpressure chain (see docs/adr/0003-ready-is-registered-at-core-inputs.md):
+  // its s_axis_tready is a flip-flop output, so a downstream stall stops at the
+  // FIFO instead of propagating combinationally into the block upstream of it.
+  // Two facts about it are latency, so they live here:
+  //   - a beat accepted on the slave port is presented on the master port one
+  //     cycle later, so every cut costs exactly one cycle of latency;
+  //   - it holds up to two beats, which is what lets a registered (one cycle
+  //     late) ready still be lossless.
+  localparam int FIFO_2DEEP_LATENCY = 1;
+  localparam int FIFO_2DEEP_DEPTH   = 2;
+
+  // Latency a sideband FIFO must span when one of these sits in FRONT of the
+  // core it rides alongside: the beats inside the core, plus the beat in flight
+  // through the cut, plus the beats parked in the cut. Feed the result to
+  // elastic_min_depth(). Getting this wrong does not mis-pair anything by one --
+  // it overflows the ring and emits a spurious TLAST.
+  function automatic int fifo_2deep_span(input int core_latency);
+    return core_latency + FIFO_2DEEP_LATENCY + FIFO_2DEEP_DEPTH;
+  endfunction
+
   //--------------------------------------------------------------------------
   // Parameters the design instantiates its cores with today.
   //--------------------------------------------------------------------------

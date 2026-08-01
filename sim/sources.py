@@ -44,6 +44,9 @@ SOURCES = {
     "axis_cordic_normalize": _hdl(
         "axis_cordic_normalize.sv",
     ),
+    "axis_fifo_2deep": _hdl(
+        "axis_fifo_2deep.sv",
+    ),
     "axis_fixed_div": _hdl(
         "axis_fixed_div.sv",
     ),
@@ -97,6 +100,7 @@ SOURCES = {
     ),
     "axis_ggx_projected_area": _hdl(
         "axis_ggx_projected_area.sv",
+        "axis_fifo_2deep.sv",
         "axis_fixed_sqrt.sv",
         "axis_trig_lut.sv",
     ),
@@ -122,6 +126,7 @@ SOURCES = {
     ),
     "axis_pre_ggx_sampler": _hdl(
         "axis_pre_ggx_sampler.v",
+        "axis_fifo_2deep.sv",
         "axis_top_lvl_sampler.sv",
         "axis_sobol2d_stateless.sv",
         "axis_hash_combine_2d.sv",
