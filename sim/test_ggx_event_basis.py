@@ -429,8 +429,109 @@ async def test_event_basis(dut):
     assert inm.transactions == outm.transactions, \
         f"Transaction count mismatch! In: {inm.transactions}, Out: {outm.transactions}"
 
-    dut._log.info("Test Passed!")    
-    
+    dut._log.info("Test Passed!")
+
+
+# ---------------------------------------------------------------------------
+# Issue #11 -- RED test for the stage 2 / 2a / 2b dropped-payload hazard.
+#
+# The defect (axis_ggx_event_basis.sv, the "Stage 2a/2b Handshake" block):
+#
+#   stage_2b_ready = pipe_en && (inv_in_ready || !s2b_advance_reg)
+#   stage_2a_ready = stage_2b_ready || !s2a_valid_reg      <-- BYPASS TERM
+#   s2b_advance    = s2a_valid && stage_2a_ready
+#
+# With pipe_en low, stage_2b_ready is low, so stage_2a_ready reduces to
+# "stage 2a is empty". If stage 2 is holding data at that moment, s2b_advance
+# asserts anyway. The stage-2 register bank is NOT gated by pipe_en and clears
+# its valid bit on s2b_advance; the stage-2a bank IS gated by pipe_en and so
+# never latches. The payload is discarded with no error and no stall.
+#
+#   WHO DISCARDS: stage 2   (s2a_valid / z2_q241 / Vh_20, ungated `else if
+#                            (s2b_advance) s2a_valid <= 1'b0`)
+#   WHO NEVER LATCHES: stage 2a (s2a_valid_reg / lensq_sub_reg / Vh_21a_reg,
+#                            guarded by `else if (pipe_en)`)
+#
+# Reaching it needs pipe_en low, stage 2 full and stage 2a empty at once. The
+# main test above never gets there: its `read_burst` waits for tvalid before
+# pausing, so its 3-cycle stalls land while the output is EMPTY, where
+# pipe_en = !tvalid = 1. This test instead parks a valid output against a
+# closed tready -- forcing pipe_en low for a long window -- and times a folded
+# norm3 completion to land inside that window, which walks a fresh payload into
+# stage 2 with stage 2a long since drained.
+#
+# EXPECTED FAILURE until issue #12 rebuilds the chain on the elastic pattern.
+# ---------------------------------------------------------------------------
+STALL_CYCLES = 900      # tready held low from cycle 0; outlasts a folded norm3 (~91 cyc)
+
+
+@cocotb.test(expect_fail=True)
+async def test_event_basis_dropped_payload_under_stall(dut):
+    """Issue #11: multiple in-flight items under backpressure must not be dropped."""
+    got = []
+
+    def collect_cb(sample):
+        got.append(vec96_to_floats(sample["m00"]))
+
+    inm = AXISMonitor(dut, 's00', dut.s00_axis_aclk, callback=None)
+    outm = AXISOutWithSidebandMonitor(dut, 'm00', dut.s00_axis_aclk, callback=collect_cb)
+    ind = AXISDriver(dut, 's00', dut.s00_axis_aclk, "M")
+    outd = AXISDriver(dut, 'm00', dut.s00_axis_aclk, "S")
+
+    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
+    await reset(dut.s00_axis_aclk, dut.s00_axis_aresetn, cycles_held=5, polarity=0)
+
+    np.random.seed(7)
+    N = 6
+    input_data, expected_vh = [], []
+    for _ in range(N):
+        v = np.random.randn(3)
+        v = v / np.linalg.norm(v)
+        alpha = float(np.random.uniform(0.05, 0.95))
+        a_q, vx_q = float_to_uq032(alpha), float_to_q131(v[0])
+        vy_q, vz_q = float_to_q131(v[1]), float_to_q131(v[2])
+        input_data.append(pack128_alpha_view(a_q, vz_q, vy_q, vx_q))
+        vh, _t1, _t2 = event_basis_ref(a_q, vx_q, vy_q, vz_q)
+        expected_vh.append(np.asarray(vh, dtype=np.float64))
+
+    # Offer everything back-to-back, so items keep arriving into the stage 2/2a
+    # chain while it is stalled. An input gap here makes the defect disappear:
+    # it shifts the phase so the stage-2 loads no longer coincide with pipe_en
+    # falling, which is exactly why this has never been observed.
+    ind.append({"type": "write_burst", "contents": {"data": input_data}})
+
+    # Consume nothing at first: the first result parks at the output with tvalid
+    # high against tready low, holding pipe_en low across the whole window.
+    outd.append({"type": "pause", "duration": STALL_CYCLES})
+    outd.append({"type": "read_burst", "duration": N})
+
+    await ClockCycles(dut.s00_axis_aclk, STALL_CYCLES + 1200 * N)
+
+    # Match outputs against inputs in order, allowing gaps, so a dropped item is
+    # named rather than showing up as an unrelated value mismatch. Deliberately
+    # no inspection of internal valid bits -- those are what is under test.
+    tol = 4e-2
+    exp_i, dropped = 0, []
+    for k, g in enumerate(got):
+        j = exp_i
+        while j < N and not np.all(np.abs(g - expected_vh[j]) <= tol):
+            j += 1
+        assert j < N, f"output #{k} Vh={g} matches no remaining input (expected from #{exp_i})"
+        dropped.extend(range(exp_i, j))
+        exp_i = j + 1
+    dropped.extend(range(exp_i, N))
+
+    dut._log.info(f"presented {N} items, observed {len(got)}, dropped {dropped}")
+    assert not dropped, (
+        f"event_basis dropped input(s) {dropped} of {N} under downstream backpressure "
+        f"with multiple items in flight ({len(got)} outputs seen). Stage 2 cleared its "
+        f"valid bit on s2b_advance while pipe_en was low, and stage 2a -- gated by "
+        f"pipe_en -- never latched the payload. See the bypass term "
+        f"'stage_2a_ready = stage_2b_ready || !s2a_valid_reg'."
+    )
+    assert len(got) == N, f"expected {N} outputs, saw {len(got)}"
+
+
 def event_basis_runner():
     """Simulate the Inv Sqrt Module"""
     hdl_toplevel_lang = os.getenv("HDL_TOPLEVEL_LANG", "verilog")
