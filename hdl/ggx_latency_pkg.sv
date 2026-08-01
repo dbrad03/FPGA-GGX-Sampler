@@ -121,7 +121,9 @@ package ggx_latency_pkg;
 
   // axis_fixed_norm3 (FOLD_INVSQRT = 0) wraps the pipelined inverse-sqrt in
   // this many additional register stages (lensq, scaling, output rounding).
-  localparam int NORM3_WRAPPER_STAGES = 9;
+  // 9 -> 10 for issue #25: the output scale was one stage doing a 16-way
+  // barrel shift and a saturate, and is now two.
+  localparam int NORM3_WRAPPER_STAGES = 10;
 
   // NOTE: norm3_pipelined_latency() was deleted along with its last reader when
   // the Oct32 encoder replaced the per-sample normalize (issue #16). norm3

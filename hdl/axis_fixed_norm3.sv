@@ -67,8 +67,9 @@ module axis_fixed_norm3#
       + 1;  // lensq:     normalize lensq to UQ0.32 + shift
   localparam int POST_INVSQRT_STAGES =
         1   // s3r:       re-register inv_len and the delayed vector
-      + 1   // s3a
-      + 1   // s3b
+      + 1   // s3a:       the Q8.56 product
+      + 1   // s3s:       the >>> (23 + shift) barrel shift
+      + 1   // s3b:       saturate to Q1.31
       + 1;  // m00_axis:  output register
   localparam int WRAPPER_STAGES = PRE_INVSQRT_STAGES + POST_INVSQRT_STAGES;
 
@@ -413,12 +414,19 @@ module axis_fixed_norm3#
     end
   endfunction
 
-  function automatic logic signed [31:0] scale_q856_to_q131(
+  // scale_q856_to_q131 used to be one function -- barrel shift then saturate --
+  // evaluated in a single cycle. That cycle was the design's WNS path at
+  // -0.822 (T16, issue #22): 9 logic levels and 5 CARRY4, the 16-way shifter's
+  // mux tree feeding the saturate comparators' carry chains. Issue #25 splits
+  // it at the obvious seam, so each half gets a cycle of its own. The two
+  // halves below compose to exactly the old expression -- this is a register
+  // split, not an arithmetic change.
+  function automatic logic signed [63:0] shift_q856(
     input logic signed [63:0] prod_q8_56,
     input logic         [3:0] shift
   );
     begin
-      scale_q856_to_q131 = saturate_q1_31(prod_q8_56 >>> (25-2+shift));
+      shift_q856 = prod_q8_56 >>> (25-2+shift);
     end
   endfunction
 
@@ -449,18 +457,23 @@ module axis_fixed_norm3#
     end
   end
 
-  logic s3a_valid, s3b_valid;
+  logic s3a_valid, s3s_valid, s3b_valid;
   logic [3:0] s3a_shift;
   logic signed [63:0] s3a_x_q856, s3a_y_q856, s3a_z_q856;
+  logic signed [63:0] s3s_x_q856, s3s_y_q856, s3s_z_q856;
   logic signed [31:0] s3b_x_q131, s3b_y_q131, s3b_z_q131;
 
   wire signed [63:0] s3a_x_q856_w = mul_pre_q131_q725_to_q856(dx_r18, invlen_r25);
   wire signed [63:0] s3a_y_q856_w = mul_pre_q131_q725_to_q856(dy_r18, invlen_r25);
   wire signed [63:0] s3a_z_q856_w = mul_pre_q131_q725_to_q856(dz_r18, invlen_r25);
 
-  wire signed [31:0] s3b_x_q131_w = scale_q856_to_q131(s3a_x_q856, s3a_shift);
-  wire signed [31:0] s3b_y_q131_w = scale_q856_to_q131(s3a_y_q856, s3a_shift);
-  wire signed [31:0] s3b_z_q131_w = scale_q856_to_q131(s3a_z_q856, s3a_shift);
+  wire signed [63:0] s3s_x_q856_w = shift_q856(s3a_x_q856, s3a_shift);
+  wire signed [63:0] s3s_y_q856_w = shift_q856(s3a_y_q856, s3a_shift);
+  wire signed [63:0] s3s_z_q856_w = shift_q856(s3a_z_q856, s3a_shift);
+
+  wire signed [31:0] s3b_x_q131_w = saturate_q1_31(s3s_x_q856);
+  wire signed [31:0] s3b_y_q131_w = saturate_q1_31(s3s_y_q856);
+  wire signed [31:0] s3b_z_q131_w = saturate_q1_31(s3s_z_q856);
 
   /// OUTPUT REGISTERS
   always_ff @(posedge s00_axis_aclk) begin
@@ -470,6 +483,10 @@ module axis_fixed_norm3#
       s3a_x_q856 <= '0;
       s3a_y_q856 <= '0;
       s3a_z_q856 <= '0;
+      s3s_valid <= 1'b0;
+      s3s_x_q856 <= '0;
+      s3s_y_q856 <= '0;
+      s3s_z_q856 <= '0;
       s3b_valid <= 1'b0;
       s3b_x_q131 <= '0;
       s3b_y_q131 <= '0;
@@ -487,8 +504,15 @@ module axis_fixed_norm3#
         s3a_z_q856 <= s3a_z_q856_w;
       end
 
-      s3b_valid <= s3a_valid;
+      s3s_valid <= s3a_valid;
       if (s3a_valid) begin
+        s3s_x_q856 <= s3s_x_q856_w;
+        s3s_y_q856 <= s3s_y_q856_w;
+        s3s_z_q856 <= s3s_z_q856_w;
+      end
+
+      s3b_valid <= s3s_valid;
+      if (s3s_valid) begin
         s3b_x_q131 <= s3b_x_q131_w;
         s3b_y_q131 <= s3b_y_q131_w;
         s3b_z_q131 <= s3b_z_q131_w;
