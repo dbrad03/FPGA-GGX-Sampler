@@ -33,6 +33,11 @@ BIAS_TOL = 8e-06
 STREAM_TOL = 1.2e-2
 ADDR_BITS = 10
 NORM_X_MIN = 2**-15
+# Set by `python sim/harness.py baseline capture|check` (issue #20). When set,
+# a passing run writes its raw Oct32 output stream here for comparison against
+# the committed baseline. Unset -- the normal case -- nothing is written and the
+# test behaves exactly as before.
+OCT32_DUMP_PATH = os.getenv("GGX_OCT32_DUMP")
 
 
 class AXISMonitor(BusMonitor):
@@ -464,6 +469,9 @@ async def test_ggx_control(dut):
     out_state = {"cmd_idx": 0, "sample_idx": 0}
     throughput_cycles_cmd0 = []
     stream_expected = []
+    # Every output beat as (burst, sample_idx, oct32_word, tlast), for the
+    # regression harness's baseline. See OCT32_DUMP_PATH.
+    oct32_dump = []
     stream_state = {"idx": 0, "max_dev": 0.0}
     stream_failures = []
     # Bias gate, relocated (issue #15). See the tap note below.
@@ -595,6 +603,12 @@ async def test_ggx_control(dut):
 
         seen["n"] += 1
         seen["out_last"] += got_last
+        # Oct32 output baseline (issue #20). The raw word, not the decoded
+        # direction: what "bit-identical" claims is that the Lane put the same
+        # bits on the stream, and decoding first would hide a change smaller
+        # than the decode's own rounding. Written out at the end of the test,
+        # only if every gate above passed.
+        oct32_dump.append((out_state["cmd_idx"], out_state["sample_idx"], raw, got_last))
         if out_state["cmd_idx"] == 0:
             throughput_cycles_cmd0.append(int(transaction["cycle"]))
 
@@ -741,6 +755,18 @@ async def test_ggx_control(dut):
         f"axis_ggx_control: outputs={seen['n']} (Oct32). "
         f"Stream deviation and bias are reported by their own gates above."
     )
+
+    # Oct32 output baseline (issue #20), written LAST, after every gate above
+    # has passed. A baseline captured from a failing run is a recorded bug that
+    # every later comparison then certifies as correct, so the dump is placed
+    # where an earlier assert can only prevent it, never produce it.
+    if OCT32_DUMP_PATH:
+        dump = Path(OCT32_DUMP_PATH)
+        dump.parent.mkdir(parents=True, exist_ok=True)
+        dump.write_text(
+            "".join(f"{b} {i} {w:08x} {l}\n" for b, i, w, l in oct32_dump)
+        )
+        dut._log.info(f"Oct32 dump: {len(oct32_dump)} Samples -> {dump}")
 
 
 def ggx_control_runner():

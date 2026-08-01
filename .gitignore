@@ -28,6 +28,11 @@ vivado/ggx_floorplan/
 # --- Generated ROM/mem (rebuilt by the cocotb tests' ensure_*_rom helpers) ---
 *.mem
 
+# --- Regression harness run directories (sim/harness.py pnr) ---
+# The reports are per-run scratch; sim/timing_history.csv is the tracked record
+# and sim/baselines/ is the tracked baseline. Both are deliberately NOT ignored.
+sim/harness_runs/
+
 # --- compiled benchmark binary (source bench/benchmark.cpp is tracked) ---
 bench/benchmark
 

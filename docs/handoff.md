@@ -237,6 +237,13 @@ lever than floorplanning the per-sample reproject datapath. The old wall #2 note
 it is now wall #1.
 
 ## How to measure / verify
+- **Recorded measurements** (issue #20): `python sim/harness.py pnr` place-and-routes and appends a
+  row — commit, WNS, TNS, failing endpoints, DSP, LUT, BRAM, CARRY4 — to the tracked
+  `sim/timing_history.csv`, refusing a degenerate build and an unexplained DSP change.
+  `python sim/harness.py baseline check` compares the Lane's Oct32 output, word for word, against the
+  committed `sim/baselines/ggx_control_oct32.txt`. See **`docs/harness.md`**. Quote rows from that
+  file rather than re-transcribing numbers out of a report. The manual flows below still apply when
+  you are investigating *where* the slack went, which the harness does not tell you.
 - **Tests** (from `sim/`, `.venv`, cocotb 1.9.2): `python test_<name>.py`. Cascade after any RTL change:
   `test_fixed_sqrt` → `test_fixed_inv_sqrt_nodsp` (and `test_fixed_inv_sqrt_folded`) →
   `test_ggx_event_basis` → `test_ggx_reproject_normalize` → **`test_integration_dual`** (the ONLY
