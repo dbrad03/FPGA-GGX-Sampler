@@ -164,6 +164,14 @@ module axis_fixed_div #
               ggx_latency_pkg::div_latency_rigid(WIDTH, FRAC_BITS));
       localparam int RING_AW = $clog2(RING_DEPTH);
 
+      // MUST stay in fabric. Left to itself Vivado infers a RAMB18 here -- the
+      // read address is a register and the read result is registered, which is
+      // exactly a block RAM -- and then absorbs the output register below into
+      // the BRAM's own. The consumer inherits a ~2.5 ns clock-to-out instead of
+      // a flip-flop's, and in oct32 that put the encoder's 5-CARRY4 field
+      // mapping 7.464 ns from its source: WNS -1.451 -> -2.517, measured, one
+      // attribute apart. A rigid core is only cheap if its ring is cheap.
+      (* ram_style = "distributed" *)
       logic [WIDTH-1:0]   ring [0:RING_DEPTH-1];
       logic [RING_AW-1:0] ring_wr_ptr, ring_rd_ptr;
       logic [RING_AW:0]   ring_count;
