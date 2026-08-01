@@ -460,12 +460,15 @@ async def test_event_basis(dut):
 # norm3 completion to land inside that window, which walks a fresh payload into
 # stage 2 with stage 2a long since drained.
 #
-# EXPECTED FAILURE until issue #12 rebuilds the chain on the elastic pattern.
+# FIXED by issue #12: the chain is now four uniform elastic register stages
+# (hs_zop -> hs_sq -> hs_sub -> hs_clamp) with no bypass term and nothing
+# observing pipe_en. This test guards that rebuild -- it failed 6-in/2-out
+# against the old handshake.
 # ---------------------------------------------------------------------------
 STALL_CYCLES = 900      # tready held low from cycle 0; outlasts a folded norm3 (~91 cyc)
 
 
-@cocotb.test(expect_fail=True)
+@cocotb.test()
 async def test_event_basis_dropped_payload_under_stall(dut):
     """Issue #11: multiple in-flight items under backpressure must not be dropped."""
     got = []

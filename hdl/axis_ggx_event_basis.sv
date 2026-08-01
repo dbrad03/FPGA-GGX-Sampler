@@ -260,13 +260,45 @@ module axis_ggx_event_basis #
 	wire signed [31:0] vh_z = $signed(norm_out[95:64]);
 	wire signed [31:0] vh_y = $signed(norm_out[63:32]);
 	wire signed [31:0] vh_x = $signed(norm_out[31:0]);
-	/// STAGE 2 Declarations (moved up to avoid forward reference error in Icarus Verilog)
-	logic s2a_valid;
-	wire s2b_advance;
-	wire s2a_ready;
-	wire s2a_load;
-	wire s2r_ready;
-	wire s2r_to_s2a;
+	// ---------------------------------------------------------------------
+	// HANDSHAKE CHAIN (hs_*)
+	//
+	// Named hs_* on purpose. The T2 arithmetic band further down this same
+	// file uses t2a_*/t2b_*, and the handshake stages used to be s2a_*/s2b_*
+	// -- one character apart, in a 630-line file, which has already caused
+	// real confusion about which band holds the critical path.
+	//
+	// Four uniform elastic register stages: zop -> sq -> sub -> clamp. A stage
+	// may accept when it is empty, or when its successor is accepting this
+	// cycle. Nothing here observes pipe_en. Backpressure arrives through
+	// inv_in_ready, which the folded inverse-sqrt drops while busy and which
+	// goes low when that engine's own output stalls against pipe_en. One
+	// discipline, propagating one way.
+	//
+	// The old chain read:
+	//     stage_2a_ready = stage_2b_ready || !s2a_valid_reg
+	// With pipe_en low, stage_2b_ready was low, so this reduced to "stage 2a
+	// is empty" and asserted anyway. Stage 2 -- not gated by pipe_en -- then
+	// cleared its valid bit, while stage 2a -- which was gated -- never
+	// latched the payload. The beat vanished with no error and no stall.
+	// Issue #11 has the test that reaches it: 6 items in, 2 out.
+	//
+	// Do NOT reintroduce that bypass term to save a cycle. With one basis in
+	// flight it never saved one; it was pure risk.
+	// ---------------------------------------------------------------------
+	logic hs_zop_valid, hs_sq_valid, hs_sub_valid, hs_clamp_valid;
+
+	wire hs_clamp_ready = !hs_clamp_valid || inv_in_ready;
+	wire hs_sub_ready   = !hs_sub_valid   || hs_clamp_ready;
+	wire hs_sq_ready    = !hs_sq_valid    || hs_sub_ready;
+	wire hs_zop_ready   = !hs_zop_valid   || hs_sq_ready;
+
+	// A load is also exactly the condition under which the PRECEDING stage's
+	// payload leaves, so each stage clears on its successor's load.
+	wire hs_zop_load   = norm_out_valid && hs_zop_ready;
+	wire hs_sq_load    = hs_zop_valid   && hs_sq_ready;
+	wire hs_sub_load   = hs_sq_valid    && hs_sub_ready;
+	wire hs_clamp_load = hs_sub_valid   && hs_clamp_ready;
 
 	// event_basis is once-per-burst: fold this norm3's inv_sqrt (bit-identical,
 	// removes its scattered sideband delay lines = the biggest route-bound bucket).
@@ -285,18 +317,16 @@ module axis_ggx_event_basis #
     .m00_axis_tvalid(norm_out_valid),
     .m00_axis_tdata(norm_out),
     .m00_axis_tstrb(),
-    .m00_axis_tready(s2r_ready)
+    .m00_axis_tready(hs_zop_ready)
 	);
 
-	/// STAGE 2R: elastic stage that registers the ROUNDED z operand ahead of the
-	/// z^2 square, so the square (stage 2) is a clean reg -> DSP -> reg multiply
-	/// instead of norm3_out -> rnd_s25 (5x CARRY4) -> DSP. Adds one cycle; the
-	/// stall handshake mirrors the existing s2a/s2b stages.
-	logic s2r_valid;
+	/// STAGE ZOP payload: the ROUNDED z operands, registered ahead of the z^2
+	/// square so the square is a clean reg -> DSP -> reg multiply instead of
+	/// norm3_out -> rnd_s25 (5x CARRY4) -> DSP. Costs one cycle. Its handshake
+	/// is the hs_* chain above, the same one every stage here uses.
 	logic signed [17:0] vhz_r18;
 	logic signed [24:0] vhz_r25;
 	logic [95:0] Vh_2r;
-	wire s2r_load = norm_out_valid && s2r_ready;
 
 	/// STAGE 2: COMPUTE LENGTH SQAURED (vhx^2 + vhy^2)
 	logic signed [42:0] z2_q241;   // vhz^2, Q2.41 (was Q2.62 with 21 dead low bits)
@@ -307,98 +337,86 @@ module axis_ggx_event_basis #
 	wire [31:0] lensq = z2_q241[41] ? 32'b0 : (ONE_Q0 - z2_uq032);
 	wire lensq_condition = lensq < UQ0_32_MIN || z2_q241[41];
 
-	// Stage 2b Handshake
+	// Payload registers for the clamp stage (was "stage 2b")
 	logic [31:0] lensq_xy_reg;
 	logic        lensq_branch_reg;
 	logic [95:0] Vh_21_reg;
-	logic        s2b_advance_reg;
-	wire stage_2b_ready = pipe_en && (inv_in_ready || !s2b_advance_reg);
 
-	// Stage 2a Handshake
+	// Payload registers for the sub stage (was "stage 2a")
 	logic [31:0] lensq_sub_reg;
 	logic        lensq_condition_reg;
 	logic [95:0] Vh_21a_reg;
-	logic        s2a_valid_reg;
-	wire stage_2a_ready = stage_2b_ready || !s2a_valid_reg;
 
-	// Upstream Handshake
-	assign s2b_advance = s2a_valid && stage_2a_ready;
-	assign s2a_ready = !s2a_valid || stage_2a_ready;
-	// s2r feeds s2a: s2r advances into s2a when s2r has data and s2a can accept.
-	assign s2r_to_s2a = s2r_valid && s2a_ready;
-	assign s2r_ready  = !s2r_valid || s2r_to_s2a;
-	assign s2a_load   = s2r_to_s2a;
-
-	// STAGE 2R -- register the rounded z operand (round rides norm3_out -> reg,
-	// off the DSP path).
+	// STAGE ZOP -- register the rounded z operands (the rounding rides
+	// norm3_out -> reg, keeping it off the DSP path).
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
-			s2r_valid <= 1'b0;
+			hs_zop_valid <= 1'b0;
 			vhz_r18 <= '0; vhz_r25 <= '0;
 			Vh_2r <= '0;
 		end else begin
-			if (s2r_load) begin
-				s2r_valid <= 1'b1;
+			if (hs_zop_load) begin
+				hs_zop_valid <= 1'b1;
 				vhz_r18 <= rnd_s18(vh_z);
 				vhz_r25 <= rnd_s25(vh_z);
 				Vh_2r   <= norm_out[95:0];
-			end else if (s2r_to_s2a) begin
-				s2r_valid <= 1'b0;
+			end else if (hs_sq_load) begin
+				hs_zop_valid <= 1'b0;
 			end
 		end
 	end
 
+	// STAGE SQ -- square the pre-rounded operand (clean reg -> DSP -> reg)
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
-			s2a_valid <= 1'b0;
+			hs_sq_valid <= 1'b0;
 			Vh_20			<= '0;
 			z2_q241 	<= '0;
 		end else begin
-			// STAGE 2 -- square the pre-rounded operand (clean reg -> DSP -> reg)
-			if (s2a_load) begin
-				s2a_valid <= 1'b1;
+			if (hs_sq_load) begin
+				hs_sq_valid <= 1'b1;
 				z2_q241 <= mul_pre_q131_q131_to_q241(vhz_r18, vhz_r25);
 				Vh_20		<= Vh_2r;
-			end else if (s2b_advance) begin
-				s2a_valid <= 1'b0; // don't need per se
+			end else if (hs_sub_load) begin
+				hs_sq_valid <= 1'b0;
 			end
 		end
 	end
 
-	// Stage 2a Registers
+	// STAGE SUB -- 1 - z^2
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn == 0) begin
-			s2a_valid_reg       <= 1'b0;
+			hs_sub_valid        <= 1'b0;
 			lensq_sub_reg       <= '0;
 			lensq_condition_reg <= 1'b0;
 			Vh_21a_reg          <= '0;
-		end else if (pipe_en) begin
-			if (stage_2a_ready) begin
-				s2a_valid_reg <= s2b_advance;
-				if (s2b_advance) begin
-					lensq_sub_reg       <= z2_q241[41] ? 32'b0 : (ONE_Q0 - z2_uq032);
-					lensq_condition_reg <= lensq_condition;
-					Vh_21a_reg          <= Vh_20;
-				end
+		end else begin
+			if (hs_sub_load) begin
+				hs_sub_valid        <= 1'b1;
+				lensq_sub_reg       <= z2_q241[41] ? 32'b0 : (ONE_Q0 - z2_uq032);
+				lensq_condition_reg <= lensq_condition;
+				Vh_21a_reg          <= Vh_20;
+			end else if (hs_clamp_load) begin
+				hs_sub_valid <= 1'b0;
 			end
 		end
 	end
 
-	// Stage 2b Registers
+	// STAGE CLAMP -- clamp to the inverse-sqrt's minimum argument
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn == 0) begin
-			s2b_advance_reg  <= 1'b0;
+			hs_clamp_valid   <= 1'b0;
 			lensq_xy_reg     <= '0;
 			lensq_branch_reg <= 1'b0;
 			Vh_21_reg        <= '0;
-		end else if (pipe_en) begin
-			if (stage_2b_ready) begin
-				s2b_advance_reg <= s2a_valid_reg;
-				if (s2a_valid_reg) begin
-					lensq_xy_reg     <= clamp_uq032_min(lensq_sub_reg);
-					lensq_branch_reg <= lensq_condition_reg;
-					Vh_21_reg        <= Vh_21a_reg;
-				end
+		end else begin
+			if (hs_clamp_load) begin
+				hs_clamp_valid   <= 1'b1;
+				lensq_xy_reg     <= clamp_uq032_min(lensq_sub_reg);
+				lensq_branch_reg <= lensq_condition_reg;
+				Vh_21_reg        <= Vh_21a_reg;
+			end else if (hs_clamp_valid && inv_in_ready) begin
+				hs_clamp_valid <= 1'b0;
 			end
 		end
 	end
@@ -415,8 +433,9 @@ module axis_ggx_event_basis #
 	/// STAGE 3: 1 / SQRT(LENSQ). event_basis is once-per-burst, so use the FOLDED
 	/// (sequential) inv_sqrt: bit-identical to the pipelined _nodsp but ~75x fewer
 	/// FFs and no scattered sideband delay lines -- the dominant route-bound
-	/// congestion in this block. The stage-2b handshake (inv_in_ready) is elastic
-	/// (line ~315), so the folded engine's busy-stall backpressures cleanly.
+	/// congestion in this block. inv_in_ready is the head of the hs_* elastic
+	/// chain above, so the folded engine's busy-stall backpressures cleanly all
+	/// the way to norm3's output handshake.
 	axis_fixed_inv_sqrt_folded # (
     .FRAC_BITS(FRAC_BITS),
     .ADDR_BITS(14)
@@ -424,7 +443,7 @@ module axis_ggx_event_basis #
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
-    .s00_axis_tvalid(s2b_advance_reg),
+    .s00_axis_tvalid(hs_clamp_valid),
     .s00_axis_tdata(lensq_xy),
     .s00_axis_tstrb('1),
     .s00_axis_tready(inv_in_ready),
