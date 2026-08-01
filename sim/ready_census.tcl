@@ -62,8 +62,18 @@ foreach pat $NETS {
     set union_slack($epn) $s
     if {$s < $worst} { set worst $s }
   }
-  puts [format "READYCENSUS pattern=%s nets=%d endpoints=%d worst=%.3f names={%s}" \
-        $pat [llength $n] [llength $paths] $worst [join [lsort [get_property NAME $n]] " "]]
+  # Fanout as well as endpoints. Cutting the chain and reducing its fanout are
+  # two DIFFERENT levers (issue #31 asks which one paid), and a net can come off
+  # the failing list while still driving 600 loads -- which is what makes the
+  # fanout lever a separate, still-available piece of work rather than a fix
+  # this one absorbed.
+  set maxfo 0
+  foreach net $n {
+    set fo [get_property FLAT_PIN_COUNT $net]
+    if {$fo ne "" && $fo > $maxfo} { set maxfo $fo }
+  }
+  puts [format "READYCENSUS pattern=%s nets=%d endpoints=%d worst=%.3f max_fanout=%d names={%s}" \
+        $pat [llength $n] [llength $paths] $worst $maxfo [join [lsort [get_property NAME $n]] " "]]
 }
 
 # How much of the design's TNS these endpoints carry -- the number that sizes
