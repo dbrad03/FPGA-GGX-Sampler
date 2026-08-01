@@ -68,12 +68,32 @@ The fix is the one this project already owns: break the combinational ready path
 with elastic buffering. `axis_skid_buffer.sv` and `axis_fifo_2deep.sv` exist,
 and `44def36` did precisely this for the stage 2/2a/2b chain.
 
-**Limit of this claim:** what is measured is that the *worst* path in each of the
-three buckets is this chain. That 820 endpoints all lie on it is inference from
-three shared startpoints, one shared endpoint type and identical logic delay —
-strong, but not individually traced. Confirm by counting failing endpoints whose
-path passes through `scram0_in_ready` / `s1_valid_reg_0` before committing
-effort on that basis.
+### Confirmed by census
+
+The above was inference from three shared startpoints. It has since been
+**measured** with `sim/ready_census.tcl` against the routed checkpoint at
+`394ea9f`, using `get_timing_paths -through <net>`, which returns the failing
+paths that actually route through a net:
+
+| net | failing endpoints through it | worst |
+|---|---|---|
+| `sqrt_t_in_ready` | 875 | −0.695 |
+| `s1b_to_s2` | 863 | −0.695 |
+| `s1_valid_reg_0` | 863 | −0.695 |
+| `scram0_in_ready` | 348 | −0.617 |
+| `scram1_in_ready` | 285 | −0.695 |
+
+**Union: 875 of 1852 failing endpoints (47.2%), carrying −174.6 ns of the
+design's −406.7 ns TNS (42.9%).** The counts are a union, not a sum — the nets
+are in series, so the same endpoint is reached through several of them.
+
+The inference said ~820; the measurement says 875, and the chain reaches wider
+than the sampler — it originates in `projected_area`, and these counts are its
+whole fanout cone.
+
+**Worst slack through the chain is −0.695, not the design's −1.330.** So this is
+a TNS lever, not a WNS one: it can clear nearly half the failing endpoints and
+move the headline number not at all. The WNS holder is the binder (#24).
 
 ## Finding 2 — the WNS holder is not the multiply it is named after
 
@@ -121,7 +141,7 @@ Ordered by slack recovered per unit of work and risk, not by endpoint count:
 |---|---|---|---|---|
 | 1 | **new — break the ready chain** | scram0/1, hash1 | ~820 | one change, ~44% of all failing endpoints, uses buffers the repo already has |
 | 2 | #25 T19 | `basis_normalize` | 211 | 5 carry chains, the cleanest split in the survey, 2nd-worst slack |
-| 3 | #28 T22 | `oct32` | 35 | cheap split; settles keep-or-revert with evidence rather than opinion |
+| 3 | oct32 divider split | `oct32` | 35 | cheap split, six carry chains, shallowest violation |
 | 4 | #24 T18 | `reproject_binder` | 6 | holds WNS, so it gates the headline number — but operand register, not multiply rewrite |
 | 5 | #23 T17 | `sampler_hash0` | 101 | the only bucket that really is the constant multiplies |
 | 6 | #27 T21 | `projected_area_sq` | 48 | structural; needs re-estimating before it is scheduled |
@@ -133,8 +153,15 @@ Ordered by slack recovered per unit of work and risk, not by endpoint count:
   multiplies. The big half is not what #23 proposes to fix.
 - **The WNS holder drops to 4th.** −1.330 is the headline, but 6 endpoints is
   0.3% of the failures. It gates the *number*, not the design.
-- **Oct32 rises.** Ranked last by slack, but it is 35 endpoints of ordinary carry
-  chain and it closes an open decision (#28) for very little work.
+- **Oct32's timing fix rises; its keep-or-revert decision does not.** These are
+  two different pieces of work and an earlier draft of this table conflated
+  them. The carry split inside `u_div_x` is 35 endpoints of ordinary pipelining
+  and can land early. The **decision** in #28 still belongs at the end of the
+  campaign for the reason that ticket already gives: 0.15 ns of WNS is not
+  answerable inside a 1.3 ns problem, and only becomes visible against a
+  near-closed design. Doing the split early does not prejudge the decision — it
+  removes Oct32's timing cost from the argument, which makes the decision
+  cleaner, not harder.
 - **`projected_area_sq` drops to last.** Not because it is small, but because it
   is the only one whose fix is not the kind of change the campaign is costed for.
 

@@ -45,6 +45,7 @@ puts "READYCENSUS total_failing [llength $all]"
 # Summing the per-net counts would double-count badly; the union is the number
 # that matters for "how much of the design does one fix move".
 array unset union_eps
+array unset union_slack
 foreach pat $NETS {
   set n [get_nets -quiet -hier -filter "NAME =~ $pat"]
   if {[llength $n] == 0} {
@@ -55,13 +56,26 @@ foreach pat $NETS {
                -nworst 1 -unique_pins -through $n]
   set worst 0.0
   foreach p $paths {
-    set union_eps([get_property NAME [get_property ENDPOINT_PIN $p]]) 1
+    set epn [get_property NAME [get_property ENDPOINT_PIN $p]]
+    set union_eps($epn) 1
     set s [get_property SLACK $p]
+    set union_slack($epn) $s
     if {$s < $worst} { set worst $s }
   }
   puts [format "READYCENSUS pattern=%s nets=%d endpoints=%d worst=%.3f names={%s}" \
         $pat [llength $n] [llength $paths] $worst [join [lsort [get_property NAME $n]] " "]]
 }
 
-puts "READYCENSUS union_endpoints [array size union_eps]"
+# How much of the design's TNS these endpoints carry -- the number that sizes
+# the ticket. TNS is the sum of per-endpoint worst slack, so summing the union's
+# slacks gives exactly the share one fix could remove.
+set union_tns 0.0
+foreach {ep s} [array get union_slack] { set union_tns [expr {$union_tns + $s}] }
+set total_tns 0.0
+foreach p $all { set total_tns [expr {$total_tns + [get_property SLACK $p]}] }
+puts [format "READYCENSUS union_endpoints %d of %d (%.1f%%)" \
+      [array size union_eps] [llength $all] \
+      [expr {100.0 * [array size union_eps] / [llength $all]}]]
+puts [format "READYCENSUS union_tns %.3f of %.3f (%.1f%%)" \
+      $union_tns $total_tns [expr {$total_tns < 0 ? 100.0 * $union_tns / $total_tns : 0}]]
 puts "READY_CENSUS_DONE"
