@@ -189,13 +189,20 @@ module axis_ggx_event_basis #
   // for every non-overflow value, and saturates correctly at the boundary.
   localparam logic signed [33:0] Q131_MAX_34 =  34'sd2147483647; //  2^31 - 1
   localparam logic signed [33:0] Q131_MIN_34 = -34'sd2147483648; // -2^31
-  function automatic logic signed [31:0] sat_shift31_q241(input logic signed [43:0] v);
-    logic signed [33:0] s;
+  // Split out of the old sat_shift31_q241 (issue #17): the 34-bit rounding add
+  // and the two 34-bit saturating compares used to share a cycle, ~9 CARRY4
+  // back to back. Stage 5c now does the add, stage 5d the saturate.
+  function automatic logic signed [33:0] rnd_shift31_q241(input logic signed [43:0] v);
     begin
-      s = $signed(v[43:10]) + $signed({33'b0, v[9]});
-      if      (s > Q131_MAX_34) sat_shift31_q241 = ONE_Q1;
-      else if (s < Q131_MIN_34) sat_shift31_q241 = NEG_ONE_Q1;
-      else                      sat_shift31_q241 = s[31:0];
+      rnd_shift31_q241 = $signed(v[43:10]) + $signed({33'b0, v[9]});
+    end
+  endfunction
+
+  function automatic logic signed [31:0] sat34_to_q131(input logic signed [33:0] s);
+    begin
+      if      (s > Q131_MAX_34) sat34_to_q131 = ONE_Q1;
+      else if (s < Q131_MIN_34) sat34_to_q131 = NEG_ONE_Q1;
+      else                      sat34_to_q131 = s[31:0];
     end
   endfunction
 
@@ -606,6 +613,12 @@ module axis_ggx_event_basis #
 	logic signed [43:0] t2b_x_r, t2b_y_r, t2b_z_r; // Q2.41 + 1 guard bit (subtraction can't wrap)
 	logic signed [31:0] t2b_x, t2b_y, t2b_z;
 	logic [95:0] Vh_50, Vh_5b, Vh_51;
+	// STAGE 5D (issue #17): the saturate, split off the rounding add above.
+	logic s5d_valid;
+	logic use_inv_sqrt_5c;
+	logic signed [33:0] t2b_x_s, t2b_y_s, t2b_z_s;
+	logic [95:0] Vh_52;
+	logic [95:0] T1_out_final2;
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
 			s5a_valid <= 1'b0;
@@ -619,6 +632,9 @@ module axis_ggx_event_basis #
 			t2b_x_r <= '0; t2b_y_r <= '0; t2b_z_r <= '0;
 			t2b_x <= '0; t2b_y <= '0; t2b_z <= '0;
 			Vh_50 <= '0; Vh_5b <= '0; Vh_51 <= '0;
+			s5d_valid <= 1'b0; use_inv_sqrt_5c <= 1'b0;
+			t2b_x_s <= '0; t2b_y_s <= '0; t2b_z_s <= '0;
+			Vh_52 <= '0; T1_out_final2 <= '0;
 		end else if (pipe_en) begin
 			// Stage 5a: DSP multiplies
 			s5a_valid <= s4d_valid;
@@ -651,15 +667,26 @@ module axis_ggx_event_basis #
 				end
 			end
 
-			// Stage 5c: sat_shift31 (fast 2-bit decode + 33-bit add, ~9 CARRY4)
+			// Stage 5c: the 34-bit rounding add only.
 			s5c_valid <= s5b_valid;
 			if (s5b_valid) begin
 				Vh_51 <= Vh_5b;
 				T1_out_final <= T1_out_5b;
-				if (use_inv_sqrt_5b) begin
-					t2b_x <= sat_shift31_q241(t2b_x_r);
-					t2b_y <= sat_shift31_q241(t2b_y_r);
-					t2b_z <= sat_shift31_q241(t2b_z_r);
+				use_inv_sqrt_5c <= use_inv_sqrt_5b;
+				t2b_x_s <= rnd_shift31_q241(t2b_x_r);
+				t2b_y_s <= rnd_shift31_q241(t2b_y_r);
+				t2b_z_s <= rnd_shift31_q241(t2b_z_r);
+			end
+
+			// Stage 5d: the saturating compares, off the adder's carry chain.
+			s5d_valid <= s5c_valid;
+			if (s5c_valid) begin
+				Vh_52 <= Vh_51;
+				T1_out_final2 <= T1_out_final;
+				if (use_inv_sqrt_5c) begin
+					t2b_x <= sat34_to_q131(t2b_x_s);
+					t2b_y <= sat34_to_q131(t2b_y_s);
+					t2b_z <= sat34_to_q131(t2b_z_s);
 				end else begin
 					t2b_x <= '0;
 					t2b_y <= ONE_Q1;
@@ -669,9 +696,9 @@ module axis_ggx_event_basis #
 		end
 	end
 
-	assign m00_axis_tvalid = s5c_valid;
-	assign m00_axis_tdata  = Vh_51;
-	assign T1							 = T1_out_final;
+	assign m00_axis_tvalid = s5d_valid;
+	assign m00_axis_tdata  = Vh_52;
+	assign T1							 = T1_out_final2;
 	assign T2							 = {t2b_z, t2b_y, t2b_x};
 	assign m00_axis_tstrb  = '1;
 	assign m00_axis_tlast  = 1'b0;
