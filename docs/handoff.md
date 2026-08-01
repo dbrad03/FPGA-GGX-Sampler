@@ -28,10 +28,10 @@ Campaign so far, from `394ea9f` (−1.330 / −406.686 / 1852): **TNS −99%, en
 better.** Four tickets did that — #31 (the ready chain), #33 (oct32's clock enable), #24 (the
 a-section capture Vivado had swallowed into a DSP) and #25 (norm3's shift/saturate split).
 
-**The design is now within 0.301 ns of closing at 200 MHz**, on 94 endpoints spread across five
-blocks with no single dominant population. That is a different regime from the one the campaign was
-planned in, and the remaining tickets were costed against a 1.3 ns problem. Re-read #26 (the
-checkpoint) before scheduling more of them.
+**The design is now within 0.301 ns of closing at 200 MHz.** That is a different regime from the one
+the campaign was planned in, and the ticket list has been re-derived against it — see "The ticket list
+was re-derived" below. #26 (the checkpoint) has been rewritten too: the premise it was drafted on,
+that structural changes here move WNS the wrong way, is contradicted by the last three fixes.
 
 The three findings that matter:
 
@@ -45,31 +45,61 @@ The three findings that matter:
    register was already in the RTL; synthesis had eaten it. See "#24 is DONE" below. The prediction
    that it "moves WNS and essentially nothing else" was **wrong**: it took 295 endpoints with it.
 3. **`projected_area_sq` is structural** — 0 logic levels, DSP straight into DSP, 78.6% of the delay
-   inside the DSP macro. #27 was costed as a register split and is not one; re-estimate before
-   scheduling.
+   inside the DSP macro. #27 was costed as a register split and is not one. **Superseded: it is a
+   register split, just not a fabric one** — see the re-derivation below. #27 is closed.
 
 **Read TNS and WNS separately from here on.** #31 should move TNS hard and WNS not at all; #24 the
 reverse. That held for #31 and **did not hold for #24**, which moved both. Judging either on the
 wrong metric reads a success as a failure — but do not treat the split as a prediction either.
 
-Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → ~~#25~~ → #26 (checkpoint) → #23, #32, #27 → #28.**
+## The ticket list was re-derived at `e27421f` (2026-08-01), and most of it was wrong
+
+**Bucket by failure mode, not by block.** The `harness.py survey` table buckets by hierarchy, which is
+how 56 of 94 endpoints ended up "unbucketed" and how three tickets kept looking live. Every one of the
+94 was enumerated off the run's `routed.dcp` and grouped by *what is wrong with it*:
+
+| family | eps | worst | ticket |
+|---|---|---|---|
+| **DSP with no pipeline register** — operand port (53) or product (8) | **61 (65%)** | −0.158 | **#34** (T28) |
+| **A RAM read sharing a cycle with arithmetic** | **20 (21%)** | **−0.301 (WNS)** | **#35** (T29) |
+| Genuine deep logic — `u_basis` t1b band 8, `oct32` 3, `hash0` 2 | 13 (14%) | −0.197 | none |
+
+**The three surviving timing tickets covered 7 of the 94 endpoints between them, worst −0.034**, and
+none of them owned WNS. Two thirds of what remains is one uniform fix that had no ticket at all.
+
+What that re-derivation did to the board:
+
+- **#34 (T28) — new.** 61 endpoints, two mirrored forms of one defect: 16 DSP cells whose operand port
+  has no `AREG`/`BREG`, and the **only two DSPs in the design with `MREG=0 PREG=0`**, whose multiply
+  array runs combinationally to `P` and eats 4.009 ns. Design-wide, 48 of 79 DSPs already carry
+  `AREG≥1` and 77 of 79 carry `PREG=1` — these sites are outliers, not a device limit. This is the
+  follow-up #24 identified and deliberately left out of its own measurement.
+- **#35 (T29) — new.** 20 endpoints, and it holds WNS. Instances **4 and 5** of the failure mode this
+  file already names three times.
+- **#27 closed**, superseded by #34 on both counts: its 2 remaining endpoints are #34's Form 1, and the
+  4.009 ns of "DSP's own propagation" it measured and called unsplittable is #34's Form 2. Its
+  "re-estimate this, it is not a register split" flag was the right call — the fix is just `MREG`
+  rather than a fabric stage.
+- **#32 closed.** oct32 went 35 → 3 endpoints and −0.315 → −0.034, mostly taken by #33. The 6-CARRY4
+  split is still the right shape; it is not worth a P&R run.
+- **#28 closed — Oct32 is KEPT.** Decided 2026-08-01. Its entire remaining timing cost is 3 endpoints
+  at −0.034, against a 128→32-bit output contract and 6 DSPs that #30's bin-pack needs. The two
+  configurations were never P&R'd head to head, which is what that ticket asked for; the decision rests
+  on the cost of keeping being small and measured. ADR-0001 is annotated, not superseded.
+- **#23 re-pointed to #19** as an area ticket. Its timing case is gone — `hash0` is 2 endpoints at
+  −0.029 and `scram0`/`scram1`/`hash1` have none at all — but 48 of 79 DSPs on constant multiplies is
+  still the binding constraint for four Lanes.
+
+Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → ~~#25~~ → #26 (checkpoint) → #34 → #35.**
 (#24 was taken before #25; it was never blocked on it.)
 
-Where the endpoints are now, measured at `e27421f` by `harness.py survey`:
-
-| ticket | block | endpoints | worst |
-|---|---|---|---|
-| — | `projected_area` trig address | ? | **−0.301 (WNS)** |
-| **#25/#26** | `basis_normalize` | 21 | −0.158 |
-| **#24/#26** | `reproject_binder` | 10 | −0.114 |
-| **#32** T26 | `oct32` carry split | 3 | −0.034 |
-| **#23** T17 | `sampler_hash0` | 2 | −0.029 |
-| **#27** T21 | `projected_area_sq` | 2 | −0.011 |
-| — | unbucketed | 56 | — |
+**#34 before #35 is a deliberate inversion.** #35 owns WNS and #34 owns bulk, and the usual argument
+takes WNS first. The call is that #34's fix is uniform and low-risk where #35's is three separate
+diagnoses across two Per-sample blocks, so it shrinks the problem before the harder work starts.
+**Judge #34 on endpoint count and TNS, not WNS.**
 
 All four sampler buckets — `hash0`, `hash1`, `scram0`, `scram1` — are effectively closed; `scram0`,
 `scram1` and `hash1` have **no failing endpoint at all** and the survey reports them as unmatched.
-#23 has 2 endpoints at −0.029 and is not worth its own ticket any more.
 
 **The new WNS holder has no ticket.** It is in `projected_area`, and it is a BRAM read into a BRAM
 address — see "#25 is DONE" below. Do not assume the remaining tickets are the remaining work: the

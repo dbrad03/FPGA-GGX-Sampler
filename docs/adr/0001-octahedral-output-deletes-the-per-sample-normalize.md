@@ -79,3 +79,24 @@ stands on bandwidth, on DSP count and on correctness.
 It does not stand on timing, and it should never have been sequenced as a timing-closure measure. The
 keep-or-revert call is tracked in the closure campaign, to be made when 0.15 ns is visible against a
 near-closed design rather than lost inside a 1.3 ns problem.
+
+## Decision (2026-08-01, issue #28): Oct32 is KEPT
+
+The near-closed design that call was waiting for arrived at `e27421f` — WNS −0.301, TNS −5.789, 94
+failing endpoints (`sim/timing_history.csv`). Against it:
+
+**Oct32's entire remaining timing cost is 3 failing endpoints at −0.034**, in `u_div_x`'s carry cone.
+It is not the WNS holder and it is not among the top blocks. Issue #32, which existed to split that
+cone, was closed on the same measurement as not worth a place-and-route run.
+
+Most of the 0.15 ns this ADR was charged with was never Oct32's to begin with. The a-section binder
+held WNS before and after the encoder landed, and #24, #25 and #33 have since taken that binder apart
+— WNS moved −1.330 → −0.301 without the encoder changing at all.
+
+**What this decision does not rest on.** Issue #28 asked for both configurations placed and routed side
+by side at the campaign's end state. That was never done. The decision rests on the cost of *keeping*
+being small and measured, not on a head-to-head, and if Oct32 is ever reconsidered that measurement is
+still the honest way to do it.
+
+This annotates the ADR rather than superseding it. Everything above stands, including — especially —
+the finding that its timing premise was wrong.
