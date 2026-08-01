@@ -62,10 +62,24 @@ how 56 of 94 endpoints ended up "unbucketed" and how three tickets kept looking 
 |---|---|---|---|
 | **DSP with no pipeline register** — operand port (53) or product (8) | **61 (65%)** | −0.158 | **#34** (T28) |
 | **A RAM read sharing a cycle with arithmetic** | **20 (21%)** | **−0.301 (WNS)** | **#35** (T29) |
-| Genuine deep logic — `u_basis` t1b band 8, `oct32` 3, `hash0` 2 | 13 (14%) | −0.197 | none |
+| `u_basis` Per-burst: t1b's 12-CARRY4 cycle (5) + an absorbed operand register (3) | 8 (9%) | −0.197 | **#36** (T30) |
+| `oct32` divider → output register, 6 CARRY4 | 3 (3%) | −0.034 | **#32** (T26) |
+| `hash0` `cmul_sum` in front of the next multiply | 2 (2%) | −0.029 | **#37** (T31) |
 
-**The three surviving timing tickets covered 7 of the 94 endpoints between them, worst −0.034**, and
-none of them owned WNS. Two thirds of what remains is one uniform fix that had no ticket at all.
+**Every one of the 94 has an owner.** For contrast, the three tickets that survived into this
+re-derivation covered 7 of the 94 between them, worst −0.034, and none of them owned WNS. Two thirds of
+what remains is one uniform fix that had no ticket at all.
+
+Two things the second pass turned up that the first missed, both from reading the *netlist* rather than
+the survey table:
+
+- **A sixth instance of the absorbed-register mode**, inside #36. `event_basis` stage 3r writes
+  `invlen_r25_3r <= rnd_u25(inv_len_q7_25)` so that stage 4a is a clean reg → DSP path. There are
+  **zero** `invlen_r25_3r` flops in fabric — absorbed into `AREG=1` — and the net driving the DSP's
+  `A[22]` is named `u_basis/rnd_u25_return0[22]`, the combinational output of the rounding function.
+  Six carry chains on the operand path, and it is #24's one-attribute fix again.
+- **`u_basis`'s T1B stage runs twelve CARRY4 in one cycle** — a 64-bit negate chained into a rounding
+  right-shift, at 67.1% logic. #25 held WNS on five. This is the most pipelineable path left.
 
 What that re-derivation did to the board:
 
@@ -80,8 +94,11 @@ What that re-derivation did to the board:
   4.009 ns of "DSP's own propagation" it measured and called unsplittable is #34's Form 2. Its
   "re-estimate this, it is not a register split" flag was the right call — the fix is just `MREG`
   rather than a fabric stage.
-- **#32 closed.** oct32 went 35 → 3 endpoints and −0.315 → −0.034, mostly taken by #33. The 6-CARRY4
-  split is still the right shape; it is not worth a P&R run.
+- **#32 closed, then reopened** and rewritten to the current measurement. oct32 went 35 → 3 endpoints
+  and −0.315 → −0.034, mostly taken by #33. Closing it was a judgement about *sequencing* and that is
+  the wrong reason to close rather than rank: the 6 CARRY4 are still in one cycle, and at **63.6%
+  logic** it is the most logic-dominated path left, which is the one shape where a split converts
+  almost directly into slack.
 - **#28 closed — Oct32 is KEPT.** Decided 2026-08-01. Its entire remaining timing cost is 3 endpoints
   at −0.034, against a 128→32-bit output contract and 6 DSPs that #30's bin-pack needs. The two
   configurations were never P&R'd head to head, which is what that ticket asked for; the decision rests
@@ -90,13 +107,20 @@ What that re-derivation did to the board:
   −0.029 and `scram0`/`scram1`/`hash1` have none at all — but 48 of 79 DSPs on constant multiplies is
   still the binding constraint for four Lanes.
 
-Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → ~~#25~~ → #26 (checkpoint) → #34 → #35.**
+Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → ~~#25~~ → #26 (checkpoint) → #34 → #35 → #36 → #32 → #37.**
 (#24 was taken before #25; it was never blocked on it.)
 
 **#34 before #35 is a deliberate inversion.** #35 owns WNS and #34 owns bulk, and the usual argument
-takes WNS first. The call is that #34's fix is uniform and low-risk where #35's is three separate
-diagnoses across two Per-sample blocks, so it shrinks the problem before the harder work starts.
-**Judge #34 on endpoint count and TNS, not WNS.**
+takes WNS first. The call (Dylan's, 2026-08-01) is that the DSP pipeline registers are the easier fix
+to add: #34 is uniform and low-risk where #35 is three separate diagnoses across two Per-sample blocks,
+so it shrinks the problem before the harder work starts. **Judge #34 on endpoint count and TNS, not
+WNS** — WNS is #35's and is expected to move little.
+
+The tail three are ordered by cost, not by slack. **#36 is the cheapest work in the campaign** —
+Per-burst, so no latency is observable, and 3 of its 8 endpoints are a one-line attribute — and it
+should be taken first if either of the big two stalls. **#32** costs a Per-sample sideband
+realignment for 0.034 ns. **#37** is 2 endpoints at −0.029 in the most Skew-prone block in the design
+and is explicitly a close-as-won't-do candidate if the design closes without it.
 
 All four sampler buckets — `hash0`, `hash1`, `scram0`, `scram1` — are effectively closed; `scram0`,
 `scram1` and `hash1` have **no failing endpoint at all** and the survey reports them as unmatched.
