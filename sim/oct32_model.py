@@ -57,15 +57,22 @@ def oct_unproject(uw):
 
 
 def quantize(f, bits):
-    """[-1, 1] -> unsigned `bits`-wide field, round-to-nearest."""
-    n = (1 << bits) - 1
-    return np.clip(np.rint((np.asarray(f) * 0.5 + 0.5) * n), 0, n).astype(np.int64)
+    """[-1, 1] -> unsigned `bits`-wide field.
+
+    Mid-tread with a 2^bits scale, NOT 2^bits - 1. The RTL encoder computes
+    this as (F + 2^k) >> s on a fixed-point F, so a 2^bits scale is a pure
+    shift while 2^bits - 1 would need a multiplier -- and the encoder is
+    required to use no DSPs. The distinction is one LSB of scale and does not
+    change the field-width conclusion (see the measurement below).
+    """
+    n = 1 << bits
+    return np.clip(np.floor((np.asarray(f) * 0.5 + 0.5) * n), 0, n - 1).astype(np.int64)
 
 
 def dequantize(q, bits):
-    """Unsigned `bits`-wide field -> [-1, 1]."""
-    n = (1 << bits) - 1
-    return np.asarray(q, dtype=np.float64) / n * 2.0 - 1.0
+    """Unsigned `bits`-wide field -> [-1, 1], reconstructing at the bin centre."""
+    n = 1 << bits
+    return (np.asarray(q, dtype=np.float64) + 0.5) / n * 2.0 - 1.0
 
 
 def oct_encode(v, bits=OCT32_BITS):

@@ -111,6 +111,10 @@ SOURCES = {
     "axis_hash_combine_2d": _hdl(
         "axis_hash_combine_2d.sv",
     ),
+    "axis_oct32_encode": _hdl(
+        "axis_oct32_encode.sv",
+        "axis_fixed_div.sv",
+    ),
     "axis_nested_uniform_scramble": _hdl(
         "axis_nested_uniform_scramble.sv",
     ),

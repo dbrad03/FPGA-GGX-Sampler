@@ -123,6 +123,12 @@ set RTL_SOURCES(axis_nested_uniform_scramble) [list \
   $_rtl_dir/axis_nested_uniform_scramble.sv \
 ]
 
+set RTL_SOURCES(axis_oct32_encode) [list \
+  $_rtl_dir/ggx_latency_pkg.sv \
+  $_rtl_dir/axis_oct32_encode.sv \
+  $_rtl_dir/axis_fixed_div.sv \
+]
+
 set RTL_SOURCES(axis_pre_ggx_sampler) [list \
   $_rtl_dir/ggx_latency_pkg.sv \
   $_rtl_dir/axis_pre_ggx_sampler.v \
