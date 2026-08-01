@@ -42,7 +42,8 @@ The three findings that matter:
 **Read TNS and WNS separately from here on.** #31 should move TNS hard and WNS not at all; #24 the
 reverse. Judging either on the wrong metric reads a success as a failure.
 
-Order: **~~#31~~ → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28.**
+Order: **~~#31~~ → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28**, with **#33** (new, from #31)
+now the largest single bucket at 694 endpoints — re-derive its place before scheduling #25.
 
 ## #31 is DONE (2026-08-01, `d1a3467`) — and it exposed the next one
 
@@ -89,7 +90,7 @@ An already-split enable that is still 88% route says the loads are physically fa
 not that there are too many per driver. The candidate fixes are replication *with placement intent*,
 a floorplan, or deleting the stall outright — running the dividers free behind a FIFO deep enough
 that they are never backpressured, which is the root-cause fix ADR-0003 deliberately did not take.
-Filed as its own ticket; it is a different piece of work from #28's keep-or-revert decision.
+Filed as **#33**; it is a different piece of work from #28's keep-or-revert decision.
 
 Second-largest is `basis_normalize` at 163 (−0.950), which is #25 — next in the order, unchanged.
 
