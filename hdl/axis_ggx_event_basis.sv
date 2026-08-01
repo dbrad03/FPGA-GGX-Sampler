@@ -506,6 +506,18 @@ module axis_ggx_event_basis #
 	logic signed [24:0] t1c_x_r25, t1c_y_r25;
 	logic signed [17:0] vh42_z_r18, vh42_x_r18, vh42_y_r18;
 	logic [95:0] Vh_40, Vh_41, Vh_42;
+	// STAGE 4D (issue #17): splits satq131 from rnd_s25. Both used to run in 4c
+	// on the same cycle -- a 64-bit saturating compare feeding a 25-bit rounding
+	// increment, then straight into the DSP A port (Vivado absorbs t1c_*_r25 as
+	// the DSP's AREG). That is two carry chains and the DSP setup in one cycle,
+	// and it was the block's WNS holder at -2.139. Now 4c registers the
+	// saturated value and 4d rounds it from a 32-bit register.
+	// event_basis is PER-BURST, so the extra cycle costs nothing.
+	logic s4d_valid;
+	logic use_inv_sqrt_43;
+	logic [95:0] Vh_43;
+	logic signed [31:0] t1c_x_d, t1c_y_d;
+	logic signed [17:0] vh43_z_r18, vh43_x_r18, vh43_y_r18;
 	always_ff @(posedge s00_axis_aclk) begin
 		if (s00_axis_aresetn==0) begin
 			s4a_valid <= 1'b0;
@@ -520,6 +532,11 @@ module axis_ggx_event_basis #
 			t1c_x_r25 <= '0; t1c_y_r25 <= '0;
 			vh42_z_r18 <= '0; vh42_x_r18 <= '0; vh42_y_r18 <= '0;
 			Vh_40 <= '0; Vh_41 <= '0; Vh_42 <= '0;
+			s4d_valid <= 1'b0;
+			use_inv_sqrt_43 <= 1'b0;
+			Vh_43 <= '0;
+			t1c_x_d <= '0; t1c_y_d <= '0;
+			vh43_z_r18 <= '0; vh43_x_r18 <= '0; vh43_y_r18 <= '0;
 		end else if (pipe_en) begin
 			s4a_valid <= s3r_valid;
 			if (s3r_valid) begin
@@ -551,10 +568,28 @@ module axis_ggx_event_basis #
 				vh42_x_r18 <= rnd_s18($signed(Vh_41[31:0]));
 				vh42_y_r18 <= rnd_s18($signed(Vh_41[63:32]));
 				if (use_inv_sqrt_41) begin
+					// Saturate only. The rounding that used to sit here, on the same
+					// cycle and on the same 64-bit value, is now stage 4d.
 					t1c_x <= satq131(t1b_x_shift);
 					t1c_y <= satq131(t1b_y_shift);
-					t1c_x_r25 <= rnd_s25(satq131(t1b_x_shift));
-					t1c_y_r25 <= rnd_s25(satq131(t1b_y_shift));
+				end
+			end
+
+			// STAGE 4D: round the SATURATED, registered 32-bit value into the
+			// 25-bit DSP operand. Everything 5a consumes is carried one more
+			// stage so it stays aligned.
+			s4d_valid <= s4c_valid;
+			if (s4c_valid) begin
+				use_inv_sqrt_43 <= use_inv_sqrt_42;
+				Vh_43 <= Vh_42;
+				vh43_z_r18 <= vh42_z_r18;
+				vh43_x_r18 <= vh42_x_r18;
+				vh43_y_r18 <= vh42_y_r18;
+				if (use_inv_sqrt_42) begin
+					t1c_x_d <= t1c_x;
+					t1c_y_d <= t1c_y;
+					t1c_x_r25 <= rnd_s25(t1c_x);
+					t1c_y_r25 <= rnd_s25(t1c_y);
 				end
 			end
 		end
@@ -586,16 +621,16 @@ module axis_ggx_event_basis #
 			Vh_50 <= '0; Vh_5b <= '0; Vh_51 <= '0;
 		end else if (pipe_en) begin
 			// Stage 5a: DSP multiplies
-			s5a_valid <= s4c_valid;
-			if (s4c_valid) begin
-				Vh_50 <= Vh_42;
-				use_inv_sqrt_50 <= use_inv_sqrt_42;
-				if (use_inv_sqrt_42) begin
-					t2a_x  <= mul_pre_q131_q131_to_q241(vh42_z_r18, t1c_y_r25);
-					t2a_y  <= mul_pre_q131_q131_to_q241(vh42_z_r18, t1c_x_r25);
-					t2a_z0 <= mul_pre_q131_q131_to_q241(vh42_x_r18, t1c_y_r25);
-					t2a_z1 <= mul_pre_q131_q131_to_q241(vh42_y_r18, t1c_x_r25);
-					T1_out0 <= {32'b0, t1c_y, t1c_x};
+			s5a_valid <= s4d_valid;
+			if (s4d_valid) begin
+				Vh_50 <= Vh_43;
+				use_inv_sqrt_50 <= use_inv_sqrt_43;
+				if (use_inv_sqrt_43) begin
+					t2a_x  <= mul_pre_q131_q131_to_q241(vh43_z_r18, t1c_y_r25);
+					t2a_y  <= mul_pre_q131_q131_to_q241(vh43_z_r18, t1c_x_r25);
+					t2a_z0 <= mul_pre_q131_q131_to_q241(vh43_x_r18, t1c_y_r25);
+					t2a_z1 <= mul_pre_q131_q131_to_q241(vh43_y_r18, t1c_x_r25);
+					T1_out0 <= {32'b0, t1c_y_d, t1c_x_d};
 				end else begin
 					T1_out0 <= {32'b0, 32'b0, ONE_Q1};
 				end
