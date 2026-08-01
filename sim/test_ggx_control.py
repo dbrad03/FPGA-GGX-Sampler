@@ -431,12 +431,15 @@ async def test_ggx_control(dut):
     # This test runs TWO independent gates over one stimulus. Neither is
     # redundant; do not delete either.
     #
-    #   Bias gate (expected_math / BIAS_TOL): builds its expected values from
-    #     a monitor tapping the reproject input INSIDE the DUT. That coupling
-    #     is what lets it hold mean_signed < 8e-6 and guard every fixed-point
-    #     narrowing decision -- but it also means it verifies reproject+norm3
-    #     against whatever Sample arrives, never that the arriving Sample
+    #   Bias gate (expected_pre / BIAS_TOL): asserts on the un-normalized
+    #     half-vector at the PRE-ENCODER tap inside the DUT, comparing against
+    #     values built from a monitor on the reproject input. That coupling is
+    #     what lets it hold mean_signed < 8e-6 and guard every fixed-point
+    #     narrowing decision -- but it also means it verifies the reproject
+    #     math against whatever Sample arrives, never that the arriving Sample
     #     sequence is right. It is blind to sampler corruption by construction.
+    #     It sits at a tap rather than the boundary because the Oct32 field
+    #     step (~3e-5) swamps 8e-6; see the note at pre_encoder_bias_model.
     #
     #   Stream-integrity gate (stream_expected / STREAM_TOL): a true black box.
     #     The whole expected Sample sequence is built offline from the Command
@@ -451,11 +454,12 @@ async def test_ggx_control(dut):
     # stream gate exists so that cannot happen again; the bias gate exists
     # because the stream gate's float reference can never be that tight.
     # ------------------------------------------------------------------
-    TOL = 6.5e-2
-    expected_math = []
     burst_sizes = []
     seen = {"n": 0, "out_last": 0}
-    stats = {"max_err": 0.0, "signed_sum": np.zeros(3), "abs_sum": np.zeros(3), "n_err": 0}
+    # Only the stream gate's deviation lives here now. The bias statistics moved
+    # to pre_stats with the gate itself -- a printed statistic that nothing feeds
+    # would read +0.000e+00 forever and look like a passing measurement.
+    stats = {"max_err": 0.0, "n_err": 0}
     parser = {"beats": [], "cmd_count": 0}
     out_state = {"cmd_idx": 0, "sample_idx": 0}
     throughput_cycles_cmd0 = []
@@ -505,7 +509,6 @@ async def test_ggx_control(dut):
 
                 t3 = np.sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2))
                 h_unnorm = t1 * t1_vec + t2 * t2_vec + t3 * vh_vec
-                expected_math.append(norm3_ref_like_rtl(h_unnorm))
                 expected_pre.append(np.asarray(h_unnorm, dtype=np.float64))
 
     async def pre_encoder_bias_model():
@@ -675,20 +678,16 @@ async def test_ggx_control(dut):
         f"max_dev={stream_state['max_dev']:.6f} tol={STREAM_TOL:.1e} "
         f"mismatches={len(stream_failures)}"
     )
-    # Systematic-bias guard. Truncating fixed-point narrowing biases toward -inf,
-    # and unlike random noise that bias does NOT average out under Monte Carlo
-    # integration -- it is a permanent error in the sampled distribution. max_err
-    # is structurally blind to it, so assert on the signed mean directly.
-    # Measured with round-half-up narrowing: (+5.8e-07, -2.7e-06, -1.3e-06).
-    # This threshold is a regression guard on the ROUNDING, not a physical budget.
-    n_err = max(stats["n_err"], 1)
-    mean_signed = stats["signed_sum"] / n_err
-    assert np.all(np.abs(mean_signed) < BIAS_TOL), (
-        f"BIAS GATE: systematic bias exceeded {BIAS_TOL:.1e}: mean_signed="
-        f"({mean_signed[0]:+.3e},{mean_signed[1]:+.3e},{mean_signed[2]:+.3e}). "
-        "A fixed-point width change has likely reintroduced truncation in place of "
-        "round-half-up; check the rnd_* helpers and any bare >>> on a product."
-    )
+    # The systematic-bias guard USED TO BE ASSERTED HERE, on the output
+    # boundary. It moved to the pre-encoder tap in issue #15 and its subject --
+    # the per-sample normalize -- was deleted in #16. The assertion itself
+    # survived that commit for a while, still reading stats["signed_sum"],
+    # which by then nothing accumulated: it compared an all-zero array against
+    # 8e-6 and passed every run. A gate fed by nothing passes, and looks
+    # exactly like a gate that is working. See the memory of this project's
+    # own history: verify a test's oracle before trusting a PASS.
+    #
+    # The real bias gate is asserted below, on expected_pre / pre_stats.
 
     # --- Stream-integrity gate verdict --------------------------------
     # Asserted after the Bias gate so that a stream defect leaves the Bias
@@ -739,13 +738,8 @@ async def test_ggx_control(dut):
     assert not bubble_idx, f"first-command throughput bubbles at output indices {bubble_idx[:8]}"
 
     dut._log.info(
-        f"axis_ggx_control stats: outputs={seen['n']} max|component_err|={stats['max_err']:.6f} tol={TOL:.6f}"
-        f" | mean_signed=({stats['signed_sum'][0]/max(stats['n_err'],1):+.3e},"
-        f"{stats['signed_sum'][1]/max(stats['n_err'],1):+.3e},"
-        f"{stats['signed_sum'][2]/max(stats['n_err'],1):+.3e})"
-        f" mean_abs=({stats['abs_sum'][0]/max(stats['n_err'],1):.3e},"
-        f"{stats['abs_sum'][1]/max(stats['n_err'],1):.3e},"
-        f"{stats['abs_sum'][2]/max(stats['n_err'],1):.3e})"
+        f"axis_ggx_control: outputs={seen['n']} (Oct32). "
+        f"Stream deviation and bias are reported by their own gates above."
     )
 
 

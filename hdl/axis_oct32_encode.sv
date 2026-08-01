@@ -56,8 +56,11 @@ module axis_oct32_encode #
   // Divider geometry. 20x18 is the "narrowly parameterized" reuse the ticket
   // asks for: the quotient only has to resolve a 16-bit field, and carrying 18
   // fractional bits leaves two bits of headroom below the field LSB.
-  localparam int DIV_W = 20;
-  localparam int DIV_F = OCT_FRAC;
+  // From the package, not restated. reproject sizes its META1 bound from these
+  // same constants, so a local copy would be two numbers that merely happen to
+  // agree -- exactly what ADR-0002 forbids.
+  localparam int DIV_W = ggx_latency_pkg::OCT32_DIV_WIDTH;
+  localparam int DIV_F = ggx_latency_pkg::OCT32_DIV_FRAC;
   // Latency comes from the package, so this block's sideband delay line cannot
   // drift from the divider it rides alongside. See ADR-0002.
   localparam int DIV_LAT = ggx_latency_pkg::div_latency(DIV_W, DIV_F);
@@ -73,6 +76,25 @@ module axis_oct32_encode #
   localparam int SHIFT_W = 6;
 
   wire pipe_en = m00_axis_tready || !m00_axis_tvalid;
+
+  // Declared here because front_en below needs it (Icarus rejects use-before-
+  // declaration at module scope).
+  wire div_x_in_ready;
+
+  // ONE enable for everything ahead of the divider, and it is the DIVIDER'S
+  // own advance condition, not this module's pipe_en.
+  //
+  // axis_fixed_div computes its own pipe_en internally. Gating the front
+  // stages and the sideband line on OUR pipe_en let the two disagree: when the
+  // encoder stalled while a divider's output slot was empty, the divider
+  // advanced -- consuming the frozen s2 beat again -- while the sideband stood
+  // still, so quotients came out paired with another Sample's signs. Measured
+  // on gapped input under backpressure: 40 Samples in, 52 out, 36 wrong.
+  // div_x_in_ready IS that internal pipe_en, exposed as the slave-side tready,
+  // so driving everything from it keeps the payload and its sideband in step
+  // by construction. Both dividers see identical valid/ready, so they stay in
+  // step with each other too.
+  wire front_en = div_x_in_ready;
 
   wire signed [31:0] hx = $signed(s00_axis_tdata[31:0]);
   wire signed [31:0] hy = $signed(s00_axis_tdata[63:32]);
@@ -102,7 +124,7 @@ module axis_oct32_encode #
     if (!s00_axis_aresetn) begin
       s0_valid <= 1'b0; s0_mag_x <= '0; s0_mag_y <= '0; s0_mag_z <= '0;
       s0_sx <= 1'b0; s0_sy <= 1'b0; s0_nz <= 1'b0; s0_last <= 1'b0;
-    end else if (pipe_en) begin
+    end else if (front_en) begin
       s0_valid <= s00_axis_tvalid;
       if (s00_axis_tvalid) begin
         s0_mag_x <= mag_x_c;
@@ -126,7 +148,7 @@ module axis_oct32_encode #
     if (!s00_axis_aresetn) begin
       s0b_valid <= 1'b0; s0b_mag_x <= '0; s0b_mag_y <= '0; s0_l1 <= '0;
       s0b_sx <= 1'b0; s0b_sy <= 1'b0; s0b_nz <= 1'b0; s0b_last <= 1'b0;
-    end else if (pipe_en) begin
+    end else if (front_en) begin
       s0b_valid <= s0_valid;
       if (s0_valid) begin
         s0b_mag_x <= s0_mag_x;
@@ -169,7 +191,7 @@ module axis_oct32_encode #
       s1_valid <= 1'b0; s1_l1 <= '0; s1_mag_x <= '0; s1_mag_y <= '0;
       s1_shamt <= '0; s1_l1_zero <= 1'b0;
       s1_sx <= 1'b0; s1_sy <= 1'b0; s1_nz <= 1'b0; s1_last <= 1'b0;
-    end else if (pipe_en) begin
+    end else if (front_en) begin
       s1_valid <= s0b_valid;
       if (s0b_valid) begin
         s1_l1 <= s0_l1; s1_mag_x <= s0b_mag_x; s1_mag_y <= s0b_mag_y;
@@ -200,7 +222,7 @@ module axis_oct32_encode #
     if (!s00_axis_aresetn) begin
       s2_valid <= 1'b0; s2_d <= '0; s2_ax <= '0; s2_ay <= '0;
       s2_sx <= 1'b0; s2_sy <= 1'b0; s2_nz <= 1'b0; s2_last <= 1'b0;
-    end else if (pipe_en) begin
+    end else if (front_en) begin
       s2_valid <= s1_valid;
       if (s1_valid) begin
         s2_d  <= div_d_clamped;
@@ -217,7 +239,6 @@ module axis_oct32_encode #
   // -------------------------------------------------------------------------
   wire [DIV_W-1:0] qx_raw, qy_raw;
   wire div_x_out_valid, div_y_out_valid;
-  wire div_x_in_ready;
 
   axis_fixed_div #(.WIDTH(DIV_W), .FRAC_BITS(DIV_F)) u_div_x (
     .s00_axis_aclk(s00_axis_aclk), .s00_axis_aresetn(s00_axis_aresetn),
@@ -250,7 +271,7 @@ module axis_oct32_encode #
       for (k = 0; k < DIV_LAT; k = k + 1) begin
         sb[k] <= 3'b0; sb_last[k] <= 1'b0;
       end
-    end else if (pipe_en) begin
+    end else if (front_en) begin
       sb[0] <= {s2_nz, s2_sy, s2_sx};
       sb_last[0] <= s2_last;
       for (k = 1; k < DIV_LAT; k = k + 1) begin
@@ -265,10 +286,21 @@ module axis_oct32_encode #
   wire d_nz = sb[DIV_LAT-1][2];
   wire d_last = sb_last[DIV_LAT-1];
 
+  // Registers a beat passes through outside the divider: s0, s0b, s1, s2 in
+  // front, and the output register behind.
+  localparam int FRONT_STAGES = 4;
+  localparam int OUT_STAGES   = 1;
+
+  // This check CAN fire, unlike a comparison of DIV_LAT against its own
+  // definition. reproject sizes its META1 TLAST FIFO from the package's figure
+  // for this block, so adding or removing a stage here without updating the
+  // package would leave that FIFO bounded against a fiction.
   initial begin
-    if (DIV_LAT != ggx_latency_pkg::div_latency(DIV_W, DIV_F))
-      $fatal(1, "axis_oct32_encode: sideband depth %0d != divider latency %0d",
-             DIV_LAT, ggx_latency_pkg::div_latency(DIV_W, DIV_F));
+    if (FRONT_STAGES + DIV_LAT + OUT_STAGES
+        != ggx_latency_pkg::oct32_encode_latency(DIV_W, DIV_F))
+      $fatal(1, "axis_oct32_encode: this block is %0d cycles deep but ggx_latency_pkg::oct32_encode_latency says %0d. Update the package (and re-check reproject's META1 depth).",
+             FRONT_STAGES + DIV_LAT + OUT_STAGES,
+             ggx_latency_pkg::oct32_encode_latency(DIV_W, DIV_F));
   end
 
   // -------------------------------------------------------------------------
@@ -311,7 +343,7 @@ module axis_oct32_encode #
     end
   end
 
-  assign s00_axis_tready = pipe_en && div_x_in_ready;
+  assign s00_axis_tready = front_en;
   assign m00_axis_tstrb  = '1;
 
 endmodule

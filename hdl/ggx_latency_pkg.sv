@@ -99,12 +99,11 @@ package ggx_latency_pkg;
   // this many additional register stages (lensq, scaling, output rounding).
   localparam int NORM3_WRAPPER_STAGES = 9;
 
-  function automatic int norm3_pipelined_latency(input int sqrt_sig_bits,
-                                                 input int div_width,
-                                                 input int div_frac_bits);
-    return inv_sqrt_nodsp_latency(sqrt_sig_bits, div_width, div_frac_bits)
-           + NORM3_WRAPPER_STAGES;
-  endfunction
+  // NOTE: norm3_pipelined_latency() was deleted along with its last reader when
+  // the Oct32 encoder replaced the per-sample normalize (issue #16). norm3
+  // itself is still live -- event_basis uses the FOLDED variant -- and
+  // NORM3_WRAPPER_STAGES above is still checked inside axis_fixed_norm3.
+  // An unread constant here is the exact thing this package exists to delete.
 
   // axis_oct32_encode: 4 stages in (magnitudes, L1 sum, shift amount, shift),
   // the divide, and 1 output register. Replaces norm3 on the per-sample path.
@@ -139,8 +138,6 @@ package ggx_latency_pkg;
   // constant rather than a call. Only add one here when a module reads it --
   // an unread constant in this package is the exact thing it exists to delete.
   localparam int SQRT_LATENCY_INST    = sqrt_latency(SQRT_SIG_BITS);                    // 26
-  localparam int NORM3_PIPELINED_LATENCY_INST =
-      norm3_pipelined_latency(SQRT_SIG_BITS, DIV_WIDTH, DIV_FRAC_BITS);                 // 151
   localparam int OCT32_ENCODE_LATENCY_INST =
       oct32_encode_latency(OCT32_DIV_WIDTH, OCT32_DIV_FRAC);                            // 82
 

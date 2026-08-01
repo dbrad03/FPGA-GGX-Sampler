@@ -306,7 +306,7 @@ async def test_reproject_normalize(dut):
     seen = {"n": 0, "out_last": 0}
     in_last_seen = {"n": 0}
     throughput_cycles = []
-    stats = {"max_err": 0.0, "max_norm_dev": 0.0}
+    stats = {"max_err": 0.0}
     TOL = 6.5e-2
     THROUGHPUT_SAMPLES = 96
 
@@ -353,11 +353,11 @@ async def test_reproject_normalize(dut):
 
         exp_dir = exp["h"] / max(float(np.linalg.norm(exp["h"])), 1e-30)
         err = np.max(np.abs(got_h - exp_dir))
-        got_norm = 1.0
-        exp_norm = 1.0
-        norm_dev = 0.0
+        # Vector LENGTH is no longer part of this block's contract -- Oct32
+        # encodes direction only -- so there is no norm deviation to report.
+        # The old max_norm_dev statistic is gone rather than pinned to zero: a
+        # statistic nothing feeds still prints, and reads like a measurement.
         stats["max_err"] = max(stats["max_err"], float(err))
-        stats["max_norm_dev"] = max(stats["max_norm_dev"], float(norm_dev))
         seen["n"] += 1
         seen["out_last"] += got_last
         if seen["n"] <= THROUGHPUT_SAMPLES:
@@ -453,7 +453,7 @@ async def test_reproject_normalize(dut):
     assert not bubble_idx, f"throughput bubbles before backpressure at output indices {bubble_idx[:8]}"
     dut._log.info(
         f"reproject_normalize stats: max|component_err|={stats['max_err']:.6f}, "
-        f"max|norm_dev|={stats['max_norm_dev']:.6f}, tol={TOL:.6f}"
+        f"tol={TOL:.6f} (Oct32: direction only, no norm statistic)"
     )
 
 

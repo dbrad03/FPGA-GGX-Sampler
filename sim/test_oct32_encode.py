@@ -203,3 +203,69 @@ def runner():
 
 if __name__ == "__main__":
     runner()
+
+
+@cocotb.test()
+async def test_oct32_encode_gapped_backpressure(dut):
+    """Gaps in the input stream AND downstream backpressure, together.
+
+    The encoder gates its own stages on pipe_en, but the axis_fixed_div
+    instances compute their own pipe_en internally. If those two disagree the
+    divider advances while the sideband delay line is frozen, which re-injects
+    a held payload and pairs quotients with another Sample's signs. A gapless
+    burst cannot show it -- exactly the lesson from issue #11.
+    """
+    vectors = build_vectors()[:40]
+    got = []
+    Mon(dut, "m00", dut.s00_axis_aclk, callback=lambda d: got.append(int(d)))
+    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
+    dut.s00_axis_aresetn.value = 0
+    dut.s00_axis_tvalid.value = 0
+    dut.m00_axis_tready.value = 0
+    await ClockCycles(dut.s00_axis_aclk, 5)
+    dut.s00_axis_aresetn.value = 1
+    await ClockCycles(dut.s00_axis_aclk, 2)
+
+    async def feed():
+        for v, _ in vectors:
+            await RisingEdge(dut.s00_axis_aclk)
+            dut.s00_axis_tvalid.value = 0          # a gap before every beat
+            await RisingEdge(dut.s00_axis_aclk)
+            dut.s00_axis_tdata.value = (q131(v[2]) << 64) | (q131(v[1]) << 32) | q131(v[0])
+            dut.s00_axis_tstrb.value = (1 << 12) - 1
+            dut.s00_axis_tvalid.value = 1
+            while True:
+                await ReadOnly()
+                r = int(dut.s00_axis_tready.value)
+                await RisingEdge(dut.s00_axis_aclk)
+                if r:
+                    break
+            dut.s00_axis_tvalid.value = 0
+
+    async def stall():
+        while True:
+            for _ in range(2):
+                await RisingEdge(dut.s00_axis_aclk)
+                dut.m00_axis_tready.value = 1
+            for _ in range(7):
+                await RisingEdge(dut.s00_axis_aclk)
+                dut.m00_axis_tready.value = 0
+
+    cocotb.start_soon(feed())
+    cocotb.start_soon(stall())
+    await ClockCycles(dut.s00_axis_aclk, 60 * len(vectors) + 800)
+
+    bad = []
+    for i, (v, name) in enumerate(vectors):
+        if i >= len(got):
+            bad.append(f"{name}: missing")
+            continue
+        gu, gw = got[i] & 0xFFFF, (got[i] >> 16) & 0xFFFF
+        eu, ew = oct_encode(v, 16)
+        if abs(int(gu) - int(eu)) > FIELD_TOL or abs(int(gw) - int(ew)) > FIELD_TOL:
+            bad.append(f"{name}: got({gu},{gw}) exp({eu},{ew})")
+    dut._log.info(f"gapped+stalled: {len(vectors)} in, {len(got)} out, {len(bad)} wrong")
+    assert len(got) == len(vectors) and not bad, (
+        f"encoder lost or corrupted Samples with gapped input under backpressure: "
+        f"{len(vectors)} in, {len(got)} out, {len(bad)} mismatched. First 5: {bad[:5]}"
+    )
