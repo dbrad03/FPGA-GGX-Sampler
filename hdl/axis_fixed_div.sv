@@ -32,7 +32,15 @@ module axis_fixed_div #
   (
     parameter integer WIDTH     = 32,
     parameter integer FRAC_BITS = 25,
-    parameter integer ELASTIC   = 1
+    parameter integer ELASTIC   = 1,
+    // Sideband carried WITH the beat, rigid mode only. A rigid core is the one
+    // place a caller cannot ride a delay line alongside: the recurrence
+    // advances every cycle whatever the caller does, and the ring then holds
+    // the result for a variable number of cycles. Carrying it here makes the
+    // pairing structural, and delivers it from the same output register as the
+    // quotient -- so a consumer's arithmetic starts at a flip-flop rather than
+    // at that consumer's own RAM read. Tie s00_axis_tuser to 0 when unused.
+    parameter integer SIDEBAND_W = 1
   )
   (
     input wire  s00_axis_aclk, s00_axis_aresetn,
@@ -40,12 +48,14 @@ module axis_fixed_div #
     // s00_axis_tdata: {A[31:0] (dividend), B[31:0] (divisor)}
     input wire [2*WIDTH-1 : 0] s00_axis_tdata,
     input wire [(2*WIDTH/8)-1: 0] s00_axis_tstrb,
+    input wire [SIDEBAND_W-1 : 0] s00_axis_tuser,
     output logic  s00_axis_tready,
 
     input wire  m00_axis_aclk, m00_axis_aresetn,
     input wire  m00_axis_tready,
     output logic  m00_axis_tvalid, m00_axis_tlast,
     output logic [WIDTH-1 : 0] m00_axis_tdata,
+    output logic [SIDEBAND_W-1 : 0] m00_axis_tuser,
     output logic [(WIDTH/8)-1: 0] m00_axis_tstrb
   );
 
@@ -145,6 +155,17 @@ module axis_fixed_div #
       assign pipe_en = m00_axis_tready || !m00_axis_tvalid;
       assign s00_axis_tready = pipe_en;
 
+      // No sideband here. A caller of the stallable core can ride a delay line
+      // on this same pipe_en and stay in step by construction, which is what
+      // oct32 did before its dividers went rigid. Fail loudly rather than
+      // silently dropping a sideband someone connected.
+      assign m00_axis_tuser = '0;
+      initial begin
+        if (SIDEBAND_W != 1)
+          $fatal(1, "axis_fixed_div: SIDEBAND_W=%0d needs ELASTIC=0 -- only the rigid variant's ring carries a sideband.",
+                 SIDEBAND_W);
+      end
+
       always_ff @(posedge s00_axis_aclk) begin
         if (s00_axis_aresetn == 0) begin
           m00_axis_tvalid <= 1'b0;
@@ -159,6 +180,12 @@ module axis_fixed_div #
       // and the carried divisor/dividend map to plain SRLs.
       assign pipe_en = 1'b1;
 
+      // The sideband rides the recurrence, then the ring, so it arrives at the
+      // output register in the same cycle as its own quotient. Free-running
+      // like everything else here, so it cannot drift: no enable to disagree
+      // about, and no depth arithmetic to get wrong.
+      logic [SIDEBAND_W-1:0] user_pipe [0:NST];
+
       localparam int RING_DEPTH =
           ggx_latency_pkg::rigid_ring_depth(
               ggx_latency_pkg::div_latency_rigid(WIDTH, FRAC_BITS));
@@ -172,7 +199,7 @@ module axis_fixed_div #
       // mapping 7.464 ns from its source: WNS -1.451 -> -2.517, measured, one
       // attribute apart. A rigid core is only cheap if its ring is cheap.
       (* ram_style = "distributed" *)
-      logic [WIDTH-1:0]   ring [0:RING_DEPTH-1];
+      logic [WIDTH+SIDEBAND_W-1:0] ring [0:RING_DEPTH-1];
       logic [RING_AW-1:0] ring_wr_ptr, ring_rd_ptr;
       logic [RING_AW:0]   ring_count;
       // Credits are the reservations: one is spent when a beat is accepted and
@@ -198,9 +225,14 @@ module axis_fixed_div #
           credits     <= RING_DEPTH[RING_AW:0];
           m00_axis_tvalid <= 1'b0;
           m00_axis_tdata  <= '0;
+          m00_axis_tuser  <= '0;
+          for (int u = 0; u <= NST; u++) user_pipe[u] <= '0;
         end else begin
+          user_pipe[0] <= s00_axis_tuser;
+          for (int u = 0; u < NST; u++) user_pipe[u+1] <= user_pipe[u];
+
           if (valid[NST]) begin
-            ring[ring_wr_ptr] <= q[NST][WIDTH-1:0];
+            ring[ring_wr_ptr] <= {user_pipe[NST], q[NST][WIDTH-1:0]};
             ring_wr_ptr <= ring_wr_ptr + 1'b1;
           end
           if (ring_pop) ring_rd_ptr <= ring_rd_ptr + 1'b1;
@@ -219,7 +251,10 @@ module axis_fixed_div #
 
           if (out_pipe_en) begin
             m00_axis_tvalid <= ring_valid;
-            if (ring_valid) m00_axis_tdata <= ring[ring_rd_ptr];
+            if (ring_valid) begin
+              m00_axis_tdata <= ring[ring_rd_ptr][WIDTH-1:0];
+              m00_axis_tuser <= ring[ring_rd_ptr][WIDTH+SIDEBAND_W-1:WIDTH];
+            end
           end
         end
       end

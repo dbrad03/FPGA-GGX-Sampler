@@ -45,8 +45,12 @@ proj_path = Path(__file__).resolve().parent.parent
 WIDTH = 20
 FRAC_BITS = 18
 ELASTIC = int(os.getenv("DIV_ELASTIC", "0"))
+# The sideband is a rigid-only feature; the stallable core $fatals on any width
+# but 1, which is itself the behaviour under test in the elastic run.
+SIDEBAND_W = 1 if ELASTIC else 4
 
 MASK = (1 << WIDTH) - 1
+SB_MASK = (1 << SIDEBAND_W) - 1
 
 
 def ref_quotient(a, b):
@@ -70,6 +74,7 @@ async def reset(dut):
     dut.s00_axis_tdata.value = 0
     dut.s00_axis_tlast.value = 0
     dut.s00_axis_tstrb.value = 0
+    dut.s00_axis_tuser.value = 0
     dut.m00_axis_tready.value = 0
     await ClockCycles(dut.s00_axis_aclk, 5)
     dut.s00_axis_aresetn.value = 1
@@ -194,6 +199,71 @@ async def test_ready_does_not_follow_downstream_ready(dut):
     )
 
 
+@cocotb.test()
+async def test_sideband_stays_with_its_own_beat(dut):
+    """TUSER must arrive paired with the quotient it was admitted with.
+
+    This is the reason the sideband moved inside the core at all. oct32 carries
+    the octahedral signs here, and a sign paired with the wrong Sample is a
+    half-vector reflected into the wrong octant -- a wrong answer that no
+    accuracy tolerance would flag, because the magnitude is right. It is the
+    defect class of 44cb724.
+
+    Each beat gets a TUSER that identifies it, so any mispairing shows up as an
+    index mismatch rather than as a plausible-looking number.
+    """
+    if ELASTIC:
+        raise cocotb.result.TestSuccess("no sideband on the stallable core, by design")
+
+    cocotb.start_soon(Clock(dut.s00_axis_aclk, 10, units="ns").start())
+    await reset(dut)
+
+    rng = random.Random(0xB0A7)
+    pairs = vectors(90, seed=3)
+    # A tag per beat, deliberately wrapping so a mispairing cannot hide as a
+    # near-miss: adjacent beats get distant tags.
+    tags = [(i * 7) & SB_MASK for i in range(len(pairs))]
+    got = []
+
+    async def source():
+        i = 0
+        while i < len(pairs):
+            a, b = pairs[i]
+            send = rng.random() < 0.65
+            dut.s00_axis_tvalid.value = 1 if send else 0
+            dut.s00_axis_tdata.value = (a << WIDTH) | b
+            dut.s00_axis_tuser.value = tags[i]
+            await ReadOnly()
+            took = send and bool(dut.s00_axis_tready.value)
+            await RisingEdge(dut.s00_axis_aclk)
+            if took:
+                i += 1
+        dut.s00_axis_tvalid.value = 0
+
+    async def snk():
+        while len(got) < len(pairs):
+            dut.m00_axis_tready.value = 1 if rng.random() < 0.55 else 0
+            await ReadOnly()
+            if dut.m00_axis_tvalid.value and dut.m00_axis_tready.value:
+                got.append((int(dut.m00_axis_tdata.value) & MASK,
+                            int(dut.m00_axis_tuser.value) & SB_MASK))
+            await RisingEdge(dut.s00_axis_aclk)
+        dut.m00_axis_tready.value = 0
+
+    src = cocotb.start_soon(source())
+    sk = cocotb.start_soon(snk())
+    await src
+    await sk
+
+    expected = [(ref_quotient(a, b), t) for (a, b), t in zip(pairs, tags)]
+    bad = [i for i in range(len(expected)) if got[i] != expected[i]]
+    assert not bad, (
+        f"{len(bad)} beats mispaired, first at index {bad[0]}: "
+        f"got (q={got[bad[0]][0]}, user={got[bad[0]][1]}) "
+        f"expected (q={expected[bad[0]][0]}, user={expected[bad[0]][1]})"
+    )
+
+
 def div_rigid_runner():
     sim = os.getenv("SIM", "icarus")
     sys.path.append(str(proj_path / "sim"))
@@ -204,7 +274,8 @@ def div_rigid_runner():
         hdl_toplevel="axis_fixed_div",
         always=True,
         build_args=["-Wall", "-I", str(proj_path / "hdl")],
-        parameters={"WIDTH": WIDTH, "FRAC_BITS": FRAC_BITS, "ELASTIC": ELASTIC},
+        parameters={"WIDTH": WIDTH, "FRAC_BITS": FRAC_BITS, "ELASTIC": ELASTIC,
+                    "SIDEBAND_W": SIDEBAND_W},
         timescale=("1ns", "1ps"),
         waves=True,
     )
