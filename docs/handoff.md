@@ -21,9 +21,11 @@ DSP-reduction / timing-closure decisions on this branch — the part that doesn'
 - **#22 (T16) — the path-shape survey.** `docs/surveys/t16-path-shapes.md`. It re-derived the campaign
   order, and three tickets were rewritten because their premises were wrong.
 
-Current measurement, `d1a3467`: **WNS −1.451, TNS −268.146, 1232 failing endpoints, 79 DSP, 9001 LUT,
-4.5 BRAM, 1302 CARRY4.** (Was `394ea9f`: −1.330 / −406.686 / 1852 / 79 / 8862 / 4.5 / 1302, before
-#31.)
+Current measurement, `28489e4`: **WNS −1.045, TNS −184.179, 875 failing endpoints, 79 DSP, 9207 LUT,
+4.5 BRAM, 1310 CARRY4.**
+
+Campaign so far, from `394ea9f` (−1.330 / −406.686 / 1852): **TNS −55%, endpoints −53%, WNS 0.285
+better.** Two tickets did that — #31 (the ready chain) and #33 (oct32's clock enable).
 
 The three findings that matter:
 
@@ -42,8 +44,25 @@ The three findings that matter:
 **Read TNS and WNS separately from here on.** #31 should move TNS hard and WNS not at all; #24 the
 reverse. Judging either on the wrong metric reads a success as a failure.
 
-Order: **~~#31~~ → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28**, with **#33** (new, from #31)
-now the largest single bucket at 694 endpoints — re-derive its place before scheduling #25.
+Order: **~~#31~~ → ~~#33~~ → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28.**
+
+Where the endpoints are now, measured at `28489e4`:
+
+| ticket | block | endpoints | worst |
+|---|---|---|---|
+| **#25** T19 | `basis_normalize` | **189** | **−0.965** |
+| **#27** T21 | `projected_area_sq` | 28 | −0.454 |
+| **#32** T26 | `oct32` carry split | 10 | −0.101 |
+| **#24** T18 | `reproject_binder` | 8 | **−1.045 (WNS)** |
+| **#23** T17 | `sampler_hash0` | 3 | −0.127 |
+| — | unbucketed | 637 | — |
+
+`sampler_scram0`, `sampler_scram1` and `sampler_hash1` now have **no failing endpoint at all**.
+
+Two things to note before picking up #25. First, **637 of the 875 are unbucketed** — no ticket owns
+them, and that is now most of the problem. Survey before assuming #25 is the biggest lever.
+Second, #32's premise is *restored*: oct32's worst path is once again the carry chain the T16 survey
+described (9 levels, 6 CARRY4, 40% route), and at −0.101 it is nearly closed on its own.
 
 ## #31 is DONE (2026-08-01, `d1a3467`) — and it exposed the next one
 
@@ -93,6 +112,46 @@ that they are never backpressured, which is the root-cause fix ADR-0003 delibera
 Filed as **#33**; it is a different piece of work from #28's keep-or-revert decision.
 
 Second-largest is `basis_normalize` at 163 (−0.950), which is #25 — next in the order, unchanged.
+
+## #33 is DONE (2026-08-01, `28489e4`) — delete the enable, don't route it
+
+oct32's two dividers are now RIGID: `axis_fixed_div` gained `ELASTIC`, and with `ELASTIC=0` the
+recurrence free-runs and carries **no clock enable at all**. Admission is capped by credits against an
+output ring deep enough to hold everything in flight, so it never needs one. Costs one cycle.
+
+|  | before (`d1a3467`) | after (`28489e4`) |
+|---|---|---|
+| WNS | −1.451 | **−1.045** (0.406 BETTER) |
+| TNS | −268.146 | **−184.179** (−31%) |
+| Failing endpoints | 1232 | **875** (−29%) |
+| `oct32` endpoints / worst | 694 / −0.534 | **10 / −0.101** |
+| LUT / BRAM | 9001 / 4.5 | 9207 / 4.5 |
+
+Note WNS improved by 0.4 ns on a ticket written as TNS-only. Not a lever on the WNS path — the holder
+is still `reproject_binder` (#24) — but 694 endpoints of congestion leaving the encoder let the placer
+do better with everything else. **Do not generalise that**; it is the opposite of what #31 measured.
+
+**Two mistakes worth not repeating, both measured, both one attribute apart from the fix.** They are
+the same mistake twice: *a RAM read sharing a cycle with arithmetic.*
+
+1. **The ring inferred as BRAM** (`f2a64eb`: −2.517 / −1296 / 2869, and BRAM 4.5 → 5.5, which is the
+   tell). A registered read address plus a registered result *is* a block RAM, so Vivado built one and
+   absorbed the divider's output register into it. oct32's 5-CARRY4 field mapping then started from a
+   BRAM's ~2.5 ns clock-to-out. Fixed by `(* ram_style = "distributed" *)`.
+2. **The sideband as a FIFO beside the core** (`b1b0f6a`: −1.434 / −293 / 1116, oct32 down to 39
+   endpoints but its worst slack *worse* at −1.120). The exact-match delay line could not survive a
+   rigid divider — the recurrence advances regardless of `front_en`, and the ring holds results for a
+   variable time — so it became an elastic FIFO. Correct, but its RAM read landed in the field
+   mapping's cycle. Fixed by carrying the sideband **inside** the core (`SIDEBAND_W` / TUSER), so it
+   leaves through the same output register as its quotient.
+
+The second fix is the better design independently of timing: the pairing became structural, and the
+encoder stopped keeping its own copy of the divider's queueing state — which is exactly the shape of
+the `44cb724` enable bug.
+
+**The rigid variant generalises.** `axis_fixed_sqrt` has the identical `pipe_en` idiom, and the
+614-fanout enables left inside `projected_area` after #31 are its. Nothing has measured whether that
+is worth doing.
 
 ## Pipeline (top = `axis_ggx_control`)
 `u_basis` (event_basis, **PER-BURST** — computed once, then N samples stream) → then the **PER-SAMPLE**
@@ -266,6 +325,9 @@ which is what ADR-adjacent issue #3 predicted. It is still a regression and is r
 | #16 + encoder enable fix (final) | **−1.330** | **−407** | **1852** |
 | #31 ready-chain cuts (`d1a3467`) | −1.451 | **−268** | **1232** |
 | #31 fourth cut, REVERTED (`19dfebb`) | −1.356 | −273 | 1488 |
+| #33 rigid dividers, ring in BRAM (`f2a64eb`) | −2.517 | −1296 | 2869 |
+| #33 ring forced to fabric (`b1b0f6a`) | −1.434 | −293 | 1116 |
+| #33 sideband inside the core (`28489e4`) | **−1.045** | **−184** | **875** |
 
 **ADR-0001's timing premise is NOT borne out, though the final picture is mixed
 rather than simply bad.** The ADR argued the per-sample normalize was "the
