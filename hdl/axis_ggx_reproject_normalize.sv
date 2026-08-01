@@ -216,8 +216,21 @@ module axis_ggx_reproject_normalize #
   logic [C_S00_AXIS_TDATA_WIDTH-1:0] a0_data;
   // t1/t2 pre-narrowed+rounded as A0 captures the input, so the A1A square is a
   // clean reg -> DSP multiply (round-half-up carry rides the A0 capture path).
-  logic signed [17:0] a0_t1_r18, a0_t2_r18;
-  logic signed [24:0] a0_t1_r25, a0_t2_r25;
+  //
+  // KEEP is what makes that sentence true in the netlist, and it is not
+  // decoration. Without it synthesis absorbs these four registers into the
+  // DSP48E1's *ADREG* -- measured on the routed netlist as AREG=0 BREG=0
+  // MREG=0 PREG=1 ADREG=1 USE_DPORT=1, with zero a0_t*_r* flops left in
+  // fabric. The capture then lives inside the DSP, the intended reg -> DSP hop
+  // stops existing, and u_skid_proj's RAMD32 read, the round-half-up
+  // conditioning and the DSP's 1.756 ns A-port setup all share one cycle: that
+  // was the design's WNS path at -1.045 ns (#24). Held in fabric the same work
+  // spans two cycles -- FIFO read plus rounding into an FDRE, then a hop of its
+  // own into the DSP. Arithmetic, Q-formats and cycle count are unchanged; the
+  // register only moves back to where the RTL already said it was. Same lever
+  // as the `keep` on b0_t1_s/b0_t2_s/b0_t3_s below.
+  (* keep = "true" *) logic signed [17:0] a0_t1_r18, a0_t2_r18;
+  (* keep = "true" *) logic signed [24:0] a0_t1_r25, a0_t2_r25;
   logic a1a_valid, a1a_last;
   logic [C_S00_AXIS_TDATA_WIDTH-1:0] a1a_data;
   logic signed [63:0] a1a_t1_sq_q262_s, a1a_t2_sq_q262_s;
