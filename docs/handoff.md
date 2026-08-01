@@ -113,9 +113,12 @@ codified the skew as a "characterised offset" instead of failing on it:
 - **State (2026-07-31):** fold committed. Since then, workstreams A and B are done — the
   Stream-integrity gate (#1/#5) and the latency package as law (#2, #6–#10). Full suite 19/19 green;
   `test_ggx_control` byte-identical to its pre-refactor baseline throughout, and post-route
-  netlist-equivalent (see re-baseline below). Next in the chain is workstream C (#3, #11/#12), the
-  event_basis elastic-handshake rebuild — **not started.**
-- **WNS is −2.078, not −1.454 — see "Timing re-baseline" below before planning against it.**
+  netlist-equivalent (see re-baseline below). Workstream C (#3, #11/#12) is also done: the
+  event_basis stage 2/2a/2b chain is rebuilt as four uniform elastic register stages
+  (`hs_zop -> hs_sq -> hs_sub -> hs_clamp`), closing a latent dropped-payload hazard that lost
+  4 of 6 items under backpressure. Next in the chain is workstream D (#4, Oct32) and #17 (the
+  per-burst T2 arithmetic wall, which now holds WNS) — **neither started.**
+- **WNS is −2.139, not −1.454 — see "Timing re-baseline" below before planning against it.**
 - **Then:** Phase 2 = real bitstream + Zybo bring-up (NO `create_bd.tcl` exists — the tracked
   `vivado/design_1_wrapper.bit` is the OLD pre-refactor design; reuse the `timing-recovery-loop`
   repo's `create_bd.tcl` + PYNQ Overlay pattern). Phase 3 = 5-lane resource-vector bin-pack.
@@ -152,7 +155,21 @@ not what is committed. Endpoint count alone (64989 vs 49028) shows it is a diffe
 - 5 of the 8 Tcl scripts were missing `axis_fixed_inv_sqrt_folded.sv` and had failed synthesis
   outright since the fold. All 8 now take their file list from `sim/sources.py`.
 
-### The staircase, re-measured
+### After workstream C (44def36, event_basis elastic rebuild)
+
+Its own P&R run, nothing else in it:
+
+| | before (031323a) | after (44def36) |
+|---|---|---|
+| WNS | −2.078 | **−2.139** (−0.061, a regression) |
+| TNS | −1653.089 | **−1242.465** (−25%) |
+| Failing endpoints | 5929 | **3249** (−45%) |
+
+The WNS holder moved to `u_basis/t2a_x_reg` / `t2a_z0_reg` — the **T2 arithmetic band**, which that
+change does not touch. Read as placement/routing churn on an unrelated path rather than causation,
+which is what ADR-adjacent issue #3 predicted. It is still a regression and is recorded as one.
+
+### The staircase, as measured at 031323a
 The top five violating paths are now **all per-burst `u_basis` t1b→t2 DSP paths**, which inverts the
 old priority — the reproject floorplan was wall #1, and is not the binder any more:
 
