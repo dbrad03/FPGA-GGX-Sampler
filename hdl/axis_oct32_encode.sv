@@ -86,25 +86,53 @@ module axis_oct32_encode #
   wire [31:0] mag_y_c = hy[31] ? (~hy + 1'b1) : hy;
   wire [31:0] mag_z_c = hz[31] ? (~hz + 1'b1) : hz;
 
+  // Stage 0a registers the three magnitudes; stage 0b sums them. They are NOT
+  // combined: each |v| is a 32-bit negate (one carry chain) and L1 is two
+  // 34-bit adds (two more), so doing both in a cycle put CARRY4=9 and 13 logic
+  // levels behind a distributed-RAM read from the upstream FIFO. That was
+  // -2.154 post-route in context, and the design's worst path -- the same
+  // "two carry chains in one cycle" shape that held the event_basis T2 band.
+  // Standalone synthesis did NOT show this (-0.282); only post-route in
+  // context did.
   logic        s0_valid;
-  logic [31:0] s0_mag_x, s0_mag_y;
-  logic [33:0] s0_l1;
+  logic [31:0] s0_mag_x, s0_mag_y, s0_mag_z;
   logic        s0_sx, s0_sy, s0_nz, s0_last;
 
   always_ff @(posedge s00_axis_aclk) begin
     if (!s00_axis_aresetn) begin
-      s0_valid <= 1'b0; s0_mag_x <= '0; s0_mag_y <= '0; s0_l1 <= '0;
+      s0_valid <= 1'b0; s0_mag_x <= '0; s0_mag_y <= '0; s0_mag_z <= '0;
       s0_sx <= 1'b0; s0_sy <= 1'b0; s0_nz <= 1'b0; s0_last <= 1'b0;
     end else if (pipe_en) begin
       s0_valid <= s00_axis_tvalid;
       if (s00_axis_tvalid) begin
         s0_mag_x <= mag_x_c;
         s0_mag_y <= mag_y_c;
-        s0_l1    <= {2'b0, mag_x_c} + {2'b0, mag_y_c} + {2'b0, mag_z_c};
+        s0_mag_z <= mag_z_c;
         s0_sx    <= hx[31];
         s0_sy    <= hy[31];
         s0_nz    <= hz[31];   // the lower-hemisphere fold
         s0_last  <= s00_axis_tlast;
+      end
+    end
+  end
+
+  // Stage 0b: L1 = |x| + |y| + |z|, from registers.
+  logic        s0b_valid;
+  logic [31:0] s0b_mag_x, s0b_mag_y;
+  logic [33:0] s0_l1;
+  logic        s0b_sx, s0b_sy, s0b_nz, s0b_last;
+
+  always_ff @(posedge s00_axis_aclk) begin
+    if (!s00_axis_aresetn) begin
+      s0b_valid <= 1'b0; s0b_mag_x <= '0; s0b_mag_y <= '0; s0_l1 <= '0;
+      s0b_sx <= 1'b0; s0b_sy <= 1'b0; s0b_nz <= 1'b0; s0b_last <= 1'b0;
+    end else if (pipe_en) begin
+      s0b_valid <= s0_valid;
+      if (s0_valid) begin
+        s0b_mag_x <= s0_mag_x;
+        s0b_mag_y <= s0_mag_y;
+        s0_l1     <= {2'b0, s0_mag_x} + {2'b0, s0_mag_y} + {2'b0, s0_mag_z};
+        s0b_sx <= s0_sx; s0b_sy <= s0_sy; s0b_nz <= s0_nz; s0b_last <= s0_last;
       end
     end
   end
@@ -142,12 +170,12 @@ module axis_oct32_encode #
       s1_shamt <= '0; s1_l1_zero <= 1'b0;
       s1_sx <= 1'b0; s1_sy <= 1'b0; s1_nz <= 1'b0; s1_last <= 1'b0;
     end else if (pipe_en) begin
-      s1_valid <= s0_valid;
-      if (s0_valid) begin
-        s1_l1 <= s0_l1; s1_mag_x <= s0_mag_x; s1_mag_y <= s0_mag_y;
+      s1_valid <= s0b_valid;
+      if (s0b_valid) begin
+        s1_l1 <= s0_l1; s1_mag_x <= s0b_mag_x; s1_mag_y <= s0b_mag_y;
         s1_shamt <= shamt_c;
         s1_l1_zero <= l1_zero_c;
-        s1_sx <= s0_sx; s1_sy <= s0_sy; s1_nz <= s0_nz; s1_last <= s0_last;
+        s1_sx <= s0b_sx; s1_sy <= s0b_sy; s1_nz <= s0b_nz; s1_last <= s0b_last;
       end
     end
   end
