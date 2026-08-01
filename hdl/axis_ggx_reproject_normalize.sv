@@ -216,19 +216,15 @@ module axis_ggx_reproject_normalize #
   logic [C_S00_AXIS_TDATA_WIDTH-1:0] a0_data;
   // t1/t2 pre-narrowed+rounded as A0 captures the input, so the A1A square is a
   // clean reg -> DSP multiply (round-half-up carry rides the A0 capture path).
-  //
-  // KEEP is what makes that sentence true in the netlist, and it is not
-  // decoration. Without it synthesis absorbs these four registers into the
-  // DSP48E1's *ADREG* -- measured on the routed netlist as AREG=0 BREG=0
-  // MREG=0 PREG=1 ADREG=1 USE_DPORT=1, with zero a0_t*_r* flops left in
-  // fabric. The capture then lives inside the DSP, the intended reg -> DSP hop
-  // stops existing, and u_skid_proj's RAMD32 read, the round-half-up
-  // conditioning and the DSP's 1.756 ns A-port setup all share one cycle: that
-  // was the design's WNS path at -1.045 ns (#24). Held in fabric the same work
-  // spans two cycles -- FIFO read plus rounding into an FDRE, then a hop of its
-  // own into the DSP. Arithmetic, Q-formats and cycle count are unchanged; the
-  // register only moves back to where the RTL already said it was. Same lever
-  // as the `keep` on b0_t1_s/b0_t2_s/b0_t3_s below.
+  // KEEP is what makes that true in the netlist: without it synthesis absorbs
+  // all four into the DSP48E1's pre-adder register (routed cell: ADREG=1
+  // USE_DPORT=1, zero a0_t*_r* flops in fabric), which deletes the reg -> DSP
+  // hop and leaves the Cut's distributed-RAM read, the round-half-up
+  // conditioning and the DSP's 1.756 ns A-port setup sharing one cycle. Held
+  // in fabric that work spans the two cycles the RTL already gave it.
+  // Arithmetic, Q-formats and cycle count unchanged. Was WNS -1.045 absorbed
+  // (28489e4), -0.764 held in fabric (504f007) -- same lever as the `keep` on
+  // b0_t1_s/b0_t2_s/b0_t3_s below.
   (* keep = "true" *) logic signed [17:0] a0_t1_r18, a0_t2_r18;
   (* keep = "true" *) logic signed [24:0] a0_t1_r25, a0_t2_r25;
   logic a1a_valid, a1a_last;

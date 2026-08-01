@@ -21,11 +21,12 @@ DSP-reduction / timing-closure decisions on this branch — the part that doesn'
 - **#22 (T16) — the path-shape survey.** `docs/surveys/t16-path-shapes.md`. It re-derived the campaign
   order, and three tickets were rewritten because their premises were wrong.
 
-Current measurement, `28489e4`: **WNS −1.045, TNS −184.179, 875 failing endpoints, 79 DSP, 9207 LUT,
-4.5 BRAM, 1310 CARRY4.**
+Current measurement, `504f007`: **WNS −0.764, TNS −157.352, 580 failing endpoints, 79 DSP, 9211 LUT,
+4.5 BRAM, 1324 CARRY4.**
 
-Campaign so far, from `394ea9f` (−1.330 / −406.686 / 1852): **TNS −55%, endpoints −53%, WNS 0.285
-better.** Two tickets did that — #31 (the ready chain) and #33 (oct32's clock enable).
+Campaign so far, from `394ea9f` (−1.330 / −406.686 / 1852): **TNS −61%, endpoints −69%, WNS 0.566
+better.** Three tickets did that — #31 (the ready chain), #33 (oct32's clock enable) and #24 (the
+a-section capture Vivado had swallowed into a DSP).
 
 The three findings that matter:
 
@@ -35,34 +36,38 @@ The three findings that matter:
    (`sim/ready_census.tcl`). This became **#31** and is the campaign's first item. #23 was narrowed to
    `hash0` alone, which is the only sampler bucket that really is the constant multiplies.
 2. **The WNS holder is not the multiply it is named after.** #24's path is a skid-buffer distributed-RAM
-   read plus operand conditioning into the DSP's `A` port. The lever is an operand register. Six
-   endpoints, so it moves WNS and essentially nothing else.
+   read plus operand conditioning into the DSP's `A` port. The lever is an operand register — and the
+   register was already in the RTL; synthesis had eaten it. See "#24 is DONE" below. The prediction
+   that it "moves WNS and essentially nothing else" was **wrong**: it took 295 endpoints with it.
 3. **`projected_area_sq` is structural** — 0 logic levels, DSP straight into DSP, 78.6% of the delay
    inside the DSP macro. #27 was costed as a register split and is not one; re-estimate before
    scheduling.
 
 **Read TNS and WNS separately from here on.** #31 should move TNS hard and WNS not at all; #24 the
-reverse. Judging either on the wrong metric reads a success as a failure.
+reverse. That held for #31 and **did not hold for #24**, which moved both. Judging either on the
+wrong metric reads a success as a failure — but do not treat the split as a prediction either.
 
-Order: **~~#31~~ → ~~#33~~ → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28.**
+Order: **~~#31~~ → ~~#33~~ → ~~#24~~ → #25 → #26 (checkpoint) → #23, #32, #27 → #28.**
+(#24 was taken before #25; it was never blocked on it.)
 
-Where the endpoints are now, measured at `28489e4`:
+Where the endpoints are now, measured at `504f007` (survey re-run against that run's `routed.dcp`):
 
 | ticket | block | endpoints | worst |
 |---|---|---|---|
-| **#25** T19 | `basis_normalize` | **189** | **−0.965** |
-| **#27** T21 | `projected_area_sq` | 28 | −0.454 |
-| **#32** T26 | `oct32` carry split | 10 | −0.101 |
-| **#24** T18 | `reproject_binder` | 8 | **−1.045 (WNS)** |
-| **#23** T17 | `sampler_hash0` | 3 | −0.127 |
-| — | unbucketed | 637 | — |
+| **#25** T19 | `basis_normalize` | **129** | **−0.764 (WNS)** |
+| **#24/#26** | `reproject_binder` | 96 | −0.581 |
+| **#32** T26 | `oct32` carry split | 34 | −0.392 |
+| **#27** T21 | `projected_area_sq` | 4 | −0.120 |
+| **#23** T17 | `sampler_hash0` | 0 | — |
+| — | unbucketed | 317 | — |
 
-`sampler_scram0`, `sampler_scram1` and `sampler_hash1` now have **no failing endpoint at all**.
+All four sampler buckets — `hash0`, `hash1`, `scram0`, `scram1` — now have **no failing endpoint at
+all**, so #23 currently has nothing to fix.
 
-Two things to note before picking up #25. First, **637 of the 875 are unbucketed** — no ticket owns
-them, and that is now most of the problem. Survey before assuming #25 is the biggest lever.
-Second, #32's premise is *restored*: oct32's worst path is once again the carry chain the T16 survey
-described (9 levels, 6 CARRY4, 40% route), and at −0.101 it is nearly closed on its own.
+Two things to note before picking up #25. First, **317 of the 580 are unbucketed** — no ticket owns
+them, and that is still the largest single share. Survey before assuming #25 is the biggest lever.
+Second, `reproject_binder` changed shape rather than closing: 8 deep endpoints became 96 shallow
+ones, all of them the same `fabric FF → DSP A` hop. See "#24 is DONE".
 
 ## #31 is DONE (2026-08-01, `d1a3467`) — and it exposed the next one
 
@@ -152,6 +157,52 @@ the `44cb724` enable bug.
 **The rigid variant generalises.** `axis_fixed_sqrt` has the identical `pipe_en` idiom, and the
 614-fanout enables left inside `projected_area` after #31 are its. Nothing has measured whether that
 is worth doing.
+
+## #24 is DONE (2026-08-01, `504f007`) — the register was there; synthesis had eaten it
+
+One attribute. `(* keep = "true" *)` on `a0_t1_r18/r25` and `a0_t2_r18/r25`.
+
+|  | before (`28489e4`) | after (`504f007`) |
+|---|---|---|
+| WNS | −1.045 | **−0.764** (0.281 BETTER) |
+| TNS | −184.179 | **−157.352** (−15%) |
+| Failing endpoints | 875 | **580** (−34%) |
+| `reproject_binder` endpoints / worst | 8 / −1.045 | 96 / −0.581 |
+| DSP / LUT / BRAM / CARRY4 | 79 / 9207 / 4.5 / 1310 | 79 / 9211 / 4.5 / 1324 |
+
+The RTL had said for a long time that the a-section square is "a clean reg → DSP multiply", with the
+round-half-up narrowing riding the A0 capture. The netlist disagreed. Vivado had absorbed all four
+capture registers into the DSP48E1's **pre-adder register** — the routed cell read `AREG=0 BREG=0
+MREG=0 PREG=1 ADREG=1 USE_DPORT=1`, and there were **zero** `a0_t*_r*` flops in fabric. With the
+capture inside the DSP, the Cut's RAMD32 read, the rounding LUTs and the DSP's A-port setup all
+shared one cycle: that was the −1.045 path. Holding the flops in fabric gives that work the two
+cycles the RTL always allocated it. `USE_DPORT` went 1 → 0, confirming the absorption is gone.
+
+**This is the third instance of one failure mode** (the other two are under #33): *the netlist quietly
+relocating a register the RTL had placed deliberately, so a RAM read ends up sharing a cycle with
+arithmetic.* BRAM absorption, pre-adder absorption, and a sideband FIFO beside a core are the same
+bug wearing different hats. When an RTL comment claims a clean reg → X path, **check the routed cell's
+register properties** before believing it. `get_property {AREG BREG MREG PREG ADREG USE_DPORT}` on the
+DSP, and `get_cells -hier` for the flops that should exist.
+
+**The residual −0.581 is a different path, and it is structural.** With no register left anywhere on
+the DSP's input side, `A[27] → PREG` is now a **3.722 ns** setup arc — the whole 25×18 multiply is in
+the same cycle as the operand route. (The 1.756 ns figure quoted for the old path was `A[0]`, the
+fastest bit of the array, into ADREG; do not reuse it as "the" A-port setup.) The 96 endpoints are
+that one hop, `a0_t2_r25_reg[24]` → `mul_pre_.../A[27]`, 0 logic levels and 74% route.
+
+Closing that needs the DSP to own an input register again *without* giving back the fabric capture —
+i.e. a **separate** `A0P` operand stage for the DSP to absorb, which is exactly the b-section's
+`B0 → B0P → B1A → B1P` shape, at the cost of one cycle. Left for **#26**, which was already blocked
+on #24: it should not land inside #24's measurement.
+
+**The b-section is the control that proves the shape.** Its `b1p_*` DSPs are still `ADREG=1
+USE_DPORT=1` with only 2 `b0p_*` flops left in fabric — the same absorption, so the "Vivado packs
+these as the DSP's AREG/BREG" claim at line ~499 is not what the netlist does either. But its worst
+A-port path is only **−0.115** (`b0_t1_s_reg[30]` → 3 LUT6 → `b1p_hx_t1_q241_reg/A[0]`). The
+absorption is not itself the defect: an absorbed pre-adder register is *cheap on the DSP side* and
+expensive on the side feeding it. The a-section was the one that lost, because what fed it was a
+distributed-RAM read. Read that before generalising "absorption is bad" into a rule.
 
 ## Pipeline (top = `axis_ggx_control`)
 `u_basis` (event_basis, **PER-BURST** — computed once, then N samples stream) → then the **PER-SAMPLE**
