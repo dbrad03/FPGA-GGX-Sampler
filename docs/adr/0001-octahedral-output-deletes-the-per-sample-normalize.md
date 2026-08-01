@@ -38,3 +38,44 @@ of `|x|+|y|+|z|`.
 - Octahedral encoding moves out of the long-term roadmap and into the timing-closure plan. A future
   reader finding a "compression" feature ranked ahead of floorplanning should read it as a
   normalize-elimination change that happens to also save bandwidth.
+
+## Outcome (annotated 2026-08-01, after implementation)
+
+**The timing premise of this ADR was wrong, and is recorded here so the next reader does not trust it
+the way its author did.**
+
+This ADR argued the per-sample normalize was "the largest block in the design and the holder of worst
+negative slack", implying its deletion would help close the Lane. It was deleted. Measured post-route,
+out-of-context, 5 ns, no phys_opt:
+
+| | before | after |
+|---|---|---|
+| WNS | −1.178 | **−1.330** |
+| TNS | −543 | −407 |
+| failing endpoints | 2081 | 1852 |
+
+Deleting the largest block **cost 0.15 ns of worst negative slack.** TNS and endpoint count improved,
+so the change reduced the bulk of the violation, but it did not do the thing it was adopted to do. The
+worst path simply reverted to `u_reproject_normalize`'s a-section DSP multiply — the same path that
+held it before — and got worse from added congestion.
+
+Two reasons, both worth carrying forward:
+
+- **The replacement is not free.** A ~151-cycle normalize was swapped for an encoder containing two
+  78-stage dividers on the per-sample path. Fewer DSPs and fewer LUTs, but not obviously easier to
+  place.
+- **Area reduction is not a timing lever on this design.** This is now the third measured instance, and
+  `docs/handoff.md` had already recorded the first two: the fold (75x fewer FFs, WNS −1.344 → −1.454)
+  and the width de-inflation (bit-identical, −1.454 → −1.903, reverted). Removing logic from a
+  congestion-bound design tends to densify it and route worse.
+
+**What this ADR got right is unaffected.** Octahedral encoding is exactly scale-invariant, the
+normalize genuinely was redundant under an Oct32 output contract, and the Oct32-over-Oct16 field-width
+argument was confirmed by measurement (issue #13): 8-bit fields put p99 angular error at 7.6% of the
+lobe at α = 0.12 with total-variation distance 3–4x above the sampling-noise floor, where 16-bit sits
+~50x below it. The output contract shrank from 128 to 32 bits and the Lane shed 6 DSPs. The decision
+stands on bandwidth, on DSP count and on correctness.
+
+It does not stand on timing, and it should never have been sequenced as a timing-closure measure. The
+keep-or-revert call is tracked in the closure campaign, to be made when 0.15 ns is visible against a
+near-closed design rather than lost inside a 1.3 ns problem.
