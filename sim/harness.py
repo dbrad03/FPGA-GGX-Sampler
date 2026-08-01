@@ -31,6 +31,8 @@ from __future__ import annotations
 import argparse
 import csv
 import os
+import re
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass, fields
@@ -297,6 +299,39 @@ def _check_sources_current():
         )
 
 
+#: Run directories kept after a successful `pnr`. Each is only ~0.5 MB, so this
+#: is about keeping the directory readable, not about disk. Enough to hold the
+#: run you just did plus the couple you are comparing it against.
+KEEP_RUNS = 5
+
+#: What prune_runs is allowed to delete: the <UTC timestamp>-<short SHA> names
+#: run_pnr creates, and nothing else. Deleting by pattern match is the one
+#: genuinely destructive thing here, so the pattern is anchored and strict --
+#: anything a person put in this directory by hand survives.
+RUN_DIR_RE = re.compile(r"^\d{8}T\d{6}Z-[0-9a-f]{7,40}$")
+
+
+def prune_runs(runs_dir: Path, keep: int = KEEP_RUNS) -> list[Path]:
+    """Delete all but the `keep` newest run directories. Returns what it removed.
+
+    Newest by name, not by mtime: the names are UTC timestamps, so they sort
+    chronologically, and unlike mtime they do not change when someone opens a
+    report or the filesystem is restored from a backup.
+    """
+    if keep < 1:
+        raise ValueError("keep must be at least 1 -- keep=0 would delete the run "
+                         "whose row was just recorded, reports and all")
+    runs_dir = Path(runs_dir)
+    if not runs_dir.is_dir():
+        return []
+
+    runs = sorted(p for p in runs_dir.iterdir() if p.is_dir() and RUN_DIR_RE.match(p.name))
+    doomed = runs[:-keep] if keep < len(runs) else []
+    for path in doomed:
+        shutil.rmtree(path)
+    return doomed
+
+
 def run_pnr(run_dir: Path) -> str:
     """Run the P&R flow with `run_dir` as CWD, so Vivado's reports land there."""
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -342,6 +377,14 @@ def cmd_pnr(args) -> int:
               "from its commit SHA.")
     if deviation:
         print(f"\n[harness] *** {deviation}")
+
+    # Only once the row is safely written. A run whose metrics were refused
+    # keeps its reports, which are exactly what you need to see to find out why.
+    pruned = prune_runs(RUNS_DIR, args.keep_runs)
+    if pruned:
+        print(f"\n[harness] pruned {len(pruned)} old run director"
+              f"{'y' if len(pruned) == 1 else 'ies'}, keeping the newest "
+              f"{args.keep_runs} (--keep-runs)")
     return 0
 
 
@@ -404,6 +447,8 @@ def main(argv=None) -> int:
 
     pnr = sub.add_parser("pnr", help="place-and-route and append a row to the history")
     pnr.add_argument("--note", default="", help="why this run's resources moved")
+    pnr.add_argument("--keep-runs", type=int, default=KEEP_RUNS, metavar="N",
+                     help=f"run directories to keep afterwards (default {KEEP_RUNS})")
     pnr.set_defaults(func=cmd_pnr)
 
     bl = sub.add_parser("baseline", help="capture or check the Oct32 output baseline")

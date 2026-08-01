@@ -12,6 +12,12 @@ since been overwritten.
 Both records are tracked in git. The tool logs and reports behind them are not —
 they land in `sim/harness_runs/<timestamp>-<sha>/`, which is gitignored.
 
+A successful `pnr` prunes that directory to the newest 5 runs (`--keep-runs N`).
+Each run is only ~0.5 MB, so this is about keeping the directory readable rather
+than about disk. Two things it will not do: prune after a run whose metrics were
+*refused* — those reports are exactly what you need to diagnose the refusal — or
+touch anything whose name is not one of its own `<timestamp>-<sha>` directories.
+
 ## Timing: `python sim/harness.py pnr [--note TEXT]`
 
 Runs the OOC synth + `opt` / `place` / `route` flow at 5 ns (`sim/harness_pnr.tcl`,

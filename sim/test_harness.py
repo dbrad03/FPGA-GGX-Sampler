@@ -23,6 +23,7 @@ from harness import (  # noqa: E402
     dsp_deviation,
     parse_baseline,
     parse_metrics,
+    prune_runs,
     Sample,
     read_rows,
     render_baseline,
@@ -176,6 +177,69 @@ def test_rows_survive_a_write_read_round_trip():
 def test_read_rows_of_a_missing_file_is_empty():
     with tempfile.TemporaryDirectory() as d:
         assert read_rows(Path(d) / "nope.csv") == []
+
+
+def _make_runs(root: Path, *names):
+    for n in names:
+        (root / n).mkdir(parents=True)
+        (root / n / "pnr.log").write_text("x")
+    return root
+
+
+RUN_NAMES = (
+    "20260801T045352Z-82276de",
+    "20260801T050017Z-62e3502",
+    "20260801T050637Z-62e3502",
+    "20260801T051306Z-468cfcb",
+)
+
+
+def test_prune_runs_keeps_the_newest_and_removes_the_rest():
+    with tempfile.TemporaryDirectory() as d:
+        root = _make_runs(Path(d), *RUN_NAMES)
+        removed = prune_runs(root, keep=2)
+        assert sorted(p.name for p in removed) == list(RUN_NAMES[:2]), removed
+        assert sorted(p.name for p in root.iterdir()) == list(RUN_NAMES[2:])
+
+
+def test_prune_runs_is_a_no_op_below_the_limit():
+    with tempfile.TemporaryDirectory() as d:
+        root = _make_runs(Path(d), *RUN_NAMES[:2])
+        assert prune_runs(root, keep=5) == []
+        assert len(list(root.iterdir())) == 2
+
+
+def test_prune_runs_ignores_anything_it_did_not_create():
+    # rmtree on a directory chosen by pattern match is the one genuinely
+    # destructive thing this harness does. It must only ever match its own
+    # <timestamp>-<sha> run directories, never a file or a stray directory
+    # someone parked here.
+    with tempfile.TemporaryDirectory() as d:
+        root = _make_runs(Path(d), *RUN_NAMES)
+        (root / "notes-i-am-keeping").mkdir()
+        (root / "scratch.txt").write_text("keep me")
+        prune_runs(root, keep=1)
+        survivors = sorted(p.name for p in root.iterdir())
+        assert survivors == [RUN_NAMES[-1], "notes-i-am-keeping", "scratch.txt"], survivors
+
+
+def test_prune_runs_of_a_missing_directory_is_empty():
+    with tempfile.TemporaryDirectory() as d:
+        assert prune_runs(Path(d) / "nope", keep=3) == []
+
+
+def test_prune_runs_refuses_to_keep_nothing():
+    # keep=0 would delete the run whose row was just recorded, taking the
+    # reports with it exactly when someone wants to look at them.
+    with tempfile.TemporaryDirectory() as d:
+        root = _make_runs(Path(d), *RUN_NAMES)
+        try:
+            prune_runs(root, keep=0)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("keep=0 must not be allowed")
+        assert len(list(root.iterdir())) == len(RUN_NAMES)
 
 
 BASELINE_SAMPLES = [
