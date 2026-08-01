@@ -178,15 +178,26 @@ which is what ADR-adjacent issue #3 predicted. It is still a regression and is r
 | #17 stage 4d (T2 saturate/round split) | −0.992 | −423 | 1992 |
 | #17 stage 5d (T2 sat/add split) | −1.178 | −543 | 2081 |
 | #16 Oct32, first attempt | **−2.154** | −3835 | 10630 |
-| #16 Oct32 + encoder stage-0 split | **−1.478** | −778 | 3429 |
+| #16 Oct32 + encoder stage-0 split | −1.478 | −778 | 3429 |
+| #16 + encoder enable fix (final) | **−1.330** | **−407** | **1852** |
 
-**ADR-0001's timing premise is CONTRADICTED by measurement, and this is the
-headline result of the Oct32 work.** The ADR argued that the per-sample
-normalize was "the largest block in the design and the holder of worst negative
-slack", so deleting it would help closure. Deleting it is functionally correct —
-the encoder is scale-invariant, the bias gate reading is unchanged, the stream
-gate passes — but timing went from −1.178 to −1.478, a **0.30 ns net
-regression**, with TNS 543 → 778 and failing endpoints 2081 → 3429.
+**ADR-0001's timing premise is NOT borne out, though the final picture is mixed
+rather than simply bad.** The ADR argued the per-sample normalize was "the
+largest block in the design and the holder of worst negative slack", so deleting
+it would help closure. Against the pre-Oct32 point (−1.178 / −543 / 2081):
+
+  WNS               −1.178 → −1.330   0.15 ns WORSE
+  TNS               −543   → −407     25% BETTER
+  failing endpoints 2081   → 1852     11% BETTER
+
+So it did not buy closure and it did not hold WNS, but it did reduce the bulk of
+the violation. The WNS holder is reproject's a-section DSP multiply
+(`mul_pre_q131_q131_to_q262`) either way — the same path before and after, never
+yet addressed directly.
+
+Note the −1.478 figure recorded earlier in this file was measured with a
+defective encoder (a dropped/duplicated-payload bug under gapped input, fixed in
+44cb724); the fix removed logic as well as the defect.
 
 What it bought: DSP 85 → 79, LUT 9296 → 8947, BRAM unchanged, FF 18290 → 18888,
 and the output contract shrinks 128 → 32 bits (the DDR3 bandwidth argument).
