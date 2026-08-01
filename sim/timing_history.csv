@@ -1,2 +1,4 @@
 commit,dirty,date,wns,tns,failing_endpoints,dsp,lut,bram,carry4,note
 468cfcb,False,2026-08-01T05:17:44Z,-1.33,-406.686,1852,79,8862,4.5,1302,
+d415639,False,2026-08-01T05:40:05Z,-1.33,-406.686,1852,79,8862,4.5,1302,T16 path-shape survey (#22)
+bb5cfbd,True,2026-08-01T05:47:43Z,-1.33,-406.686,1852,79,8862,4.5,1302,T16 path-shape survey (#22)
