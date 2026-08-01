@@ -55,6 +55,13 @@ route_design
 # No phys_opt_design -- see the note in impl_breakdown.tcl. Every row in the
 # history file must come from the same flow or the trend is meaningless.
 
+# Save the routed design so later questions about THIS netlist -- which net
+# carries which failing endpoints, what the second-worst path in a block looks
+# like -- cost about a minute to reopen instead of another 12-minute run. The
+# T16 survey had to pay that 12 minutes twice for want of this file.
+# Gitignored with the rest of the run directory, and pruned with it.
+write_checkpoint -force routed.dcp
+
 report_timing_summary -file timing_summary_harness.rpt
 report_utilization -file util_harness.rpt
 set util_text [report_utilization -return_string]
