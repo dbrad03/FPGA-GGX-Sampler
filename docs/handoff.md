@@ -193,8 +193,9 @@ that one hop, `a0_t2_r25_reg[24]` → `mul_pre_.../A[27]`, 0 logic levels and 74
 
 Closing that needs the DSP to own an input register again *without* giving back the fabric capture —
 i.e. a **separate** `A0P` operand stage for the DSP to absorb, which is exactly the b-section's
-`B0 → B0P → B1A → B1P` shape, at the cost of one cycle. Left for **#26**, which was already blocked
-on #24: it should not land inside #24's measurement.
+`B0 → B0P → B1A → B1P` shape, at the cost of one cycle. **This has no ticket yet.** It was kept out
+of #24 so the measurement stayed clean; #26 is the checkpoint that decides whether the campaign runs
+far enough to want it, so raise it there rather than assuming it.
 
 **The b-section is the control that proves the shape.** Its `b1p_*` DSPs are still `ADREG=1
 USE_DPORT=1` with only 2 `b0p_*` flops left in fabric — the same absorption, so the "Vivado packs
