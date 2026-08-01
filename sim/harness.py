@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression harness: one command per claim this project makes about itself.
 
-Two claims, two subcommands.
+Two claims, plus the survey that decides what to work on next.
 
     python sim/harness.py pnr [--note TEXT]
         Place-and-route the Lane and append one row to sim/timing_history.csv,
@@ -9,6 +9,13 @@ Two claims, two subcommands.
         CARRY4. Every timing number quoted in an issue, an ADR or a handoff note
         should be a row in that file rather than a figure transcribed by hand
         from a report that has since been overwritten.
+
+    python sim/harness.py survey [--note TEXT]
+        The same P&R and the same row, plus report_timing detail for the worst
+        failing path in each block the campaign is ordered around: logic levels,
+        the CARRY4 count on the path, and the logic-vs-route split. Endpoint
+        counts say WHERE the violation is; this says what SHAPE it is, which is
+        what decides whether the fix is a register split or a redesign.
 
     python sim/harness.py baseline capture|check
         Capture, or compare against, the exact Oct32 word test_ggx_control's
@@ -46,6 +53,7 @@ PROJ_DIR = SIM_DIR.parent
 HISTORY_PATH = SIM_DIR / "timing_history.csv"
 BASELINE_PATH = SIM_DIR / "baselines" / "ggx_control_oct32.txt"
 PNR_TCL = SIM_DIR / "harness_pnr.tcl"
+SURVEY_TCL = SIM_DIR / "survey_paths.tcl"
 RUNS_DIR = SIM_DIR / "harness_runs"
 
 #: Printed by harness_pnr.tcl once the whole flow has run. Vivado exits 0 after
@@ -118,6 +126,64 @@ def parse_metrics(log_text: str) -> dict:
         except ValueError as e:
             raise HarnessError(f"'{key}' is not a number: {found[key]!r}") from e
     return metrics
+
+
+# ------------------------------------------------- T16 path-shape survey (#22)
+
+#: Printed by survey_paths.tcl once every block has been reported.
+SURVEY_SENTINEL = "HARNESS_SURVEY_DONE"
+
+#: Per-block shape fields, and how to read them. `carry4` is the one the survey
+#: exists for: two carry chains inside one cycle is a register split, one chain
+#: is not.
+SURVEY_FIELDS = {
+    "endpoints": int, "slack": float, "levels": int, "logic": float,
+    "route": float, "route_pct": float, "carry4": int, "dsp": int, "lut": int,
+}
+
+
+def parse_survey(log_text: str) -> tuple[list[dict], list[str]]:
+    """Read survey_paths.tcl's output into per-block shape records.
+
+    Returns (blocks, missing). `missing` names blocks whose prefix matched no
+    failing endpoint -- reported rather than dropped, because a block that has
+    stopped failing is a survey finding in its own right.
+    """
+    if SURVEY_SENTINEL not in log_text:
+        raise HarnessError(
+            f"the survey never printed {SURVEY_SENTINEL} -- it did not reach the "
+            f"end, so the blocks it did report may not be all of them"
+        )
+
+    blocks, missing, pins = {}, [], {}
+    for line in log_text.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if parts[0] == "GGXSURVEY" and len(parts) > 2 and parts[1] == "MISSING":
+            missing.append(parts[2])
+        elif parts[0] in ("GGXSURVEY", "GGXSURVEYPIN") and "=" in line:
+            kv = dict(p.split("=", 1) for p in parts[1:] if "=" in p)
+            if "block" not in kv:
+                continue
+            if parts[0] == "GGXSURVEYPIN":
+                pins[kv["block"]] = kv
+            else:
+                rec = {"block": kv["block"]}
+                for key, cast in SURVEY_FIELDS.items():
+                    if key in kv:
+                        rec[key] = cast(kv[key])
+                blocks[kv["block"]] = rec
+
+    for name, rec in blocks.items():
+        if name not in pins:
+            raise HarnessError(
+                f"block '{name}' reported shape numbers but no start/end pins -- "
+                f"a finding you cannot go and look at is not a finding"
+            )
+        rec.update(start=pins[name]["start"], end=pins[name]["end"])
+
+    return list(blocks.values()), missing
 
 
 @dataclass(frozen=True)
@@ -332,8 +398,8 @@ def prune_runs(runs_dir: Path, keep: int = KEEP_RUNS) -> list[Path]:
     return doomed
 
 
-def run_pnr(run_dir: Path) -> str:
-    """Run the P&R flow with `run_dir` as CWD, so Vivado's reports land there."""
+def run_pnr(run_dir: Path, tcl: Path = None) -> str:
+    """Run a P&R flow with `run_dir` as CWD, so Vivado's reports land there."""
     run_dir.mkdir(parents=True, exist_ok=True)
     roms = sorted(SIM_DIR.glob(ROM_GLOB))
     if not roms:
@@ -344,17 +410,25 @@ def run_pnr(run_dir: Path) -> str:
     print(f"[harness] place-and-route running (~10 min); log: {log_path}")
     with open(log_path, "w") as log:
         subprocess.run(
-            ["vivado", "-mode", "batch", "-notrace", "-source", str(PNR_TCL)],
+            ["vivado", "-mode", "batch", "-notrace", "-source", str(tcl or PNR_TCL)],
             cwd=run_dir, stdout=log, stderr=subprocess.STDOUT, check=False,
         )
     return log_path.read_text(errors="replace")
 
 
-def cmd_pnr(args) -> int:
+def _measure_and_record(args, tcl: Path = None) -> tuple[str, Path]:
+    """One P&R, one row. Shared by `pnr` and `survey`.
+
+    The survey runs the same flow with extra reporting bolted on the end, so it
+    would be perverse for it not to record its row -- and T16 (#22) asks for
+    exactly that: survey results recorded through the T14 harness rather than
+    alongside it.
+    """
     _check_sources_current()
     commit, dirty = git_state()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    log_text = run_pnr(RUNS_DIR / f"{stamp}-{commit}")
+    run_dir = RUNS_DIR / f"{stamp}-{commit}"
+    log_text = run_pnr(run_dir, tcl)
 
     metrics = parse_metrics(log_text)
     row = Row(
@@ -385,6 +459,33 @@ def cmd_pnr(args) -> int:
         print(f"\n[harness] pruned {len(pruned)} old run director"
               f"{'y' if len(pruned) == 1 else 'ies'}, keeping the newest "
               f"{args.keep_runs} (--keep-runs)")
+    return log_text, run_dir
+
+
+def cmd_pnr(args) -> int:
+    _measure_and_record(args)
+    return 0
+
+
+def cmd_survey(args) -> int:
+    log_text, run_dir = _measure_and_record(args, SURVEY_TCL)
+    blocks, missing = parse_survey(log_text)
+
+    print(f"\n[harness] path shapes ({len(blocks)} blocks), "
+          f"full report_timing in {run_dir.relative_to(PROJ_DIR)}/survey_paths.rpt:\n")
+    hdr = f"{'BLOCK':<18}{'ENDPTS':>7}{'SLACK':>8}{'LVLS':>5}{'CARRY4':>7}{'DSP':>4}" \
+          f"{'LOGIC':>8}{'ROUTE':>8}{'ROUTE%':>8}"
+    print(hdr)
+    print("-" * len(hdr))
+    for b in sorted(blocks, key=lambda r: r["slack"]):
+        print(f"{b['block']:<18}{b['endpoints']:>7}{b['slack']:>8.3f}{b['levels']:>5}"
+              f"{b['carry4']:>7}{b['dsp']:>4}{b['logic']:>8.3f}{b['route']:>8.3f}"
+              f"{b['route_pct']:>8.1f}")
+    for b in sorted(blocks, key=lambda r: r["slack"]):
+        print(f"\n  {b['block']}\n    from {b['start']}\n      to {b['end']}")
+    if missing:
+        print(f"\n[harness] NO failing endpoint matched: {', '.join(missing)} "
+              f"-- either the block now closes, or its prefix is wrong. Check which.")
     return 0
 
 
@@ -450,6 +551,12 @@ def main(argv=None) -> int:
     pnr.add_argument("--keep-runs", type=int, default=KEEP_RUNS, metavar="N",
                      help=f"run directories to keep afterwards (default {KEEP_RUNS})")
     pnr.set_defaults(func=cmd_pnr)
+
+    sv = sub.add_parser("survey", help="P&R, record a row, and dump per-block path shapes")
+    sv.add_argument("--note", default="", help="why this run's resources moved")
+    sv.add_argument("--keep-runs", type=int, default=KEEP_RUNS, metavar="N",
+                    help=f"run directories to keep afterwards (default {KEEP_RUNS})")
+    sv.set_defaults(func=cmd_survey)
 
     bl = sub.add_parser("baseline", help="capture or check the Oct32 output baseline")
     bl.add_argument("mode", choices=["capture", "check"])

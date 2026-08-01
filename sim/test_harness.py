@@ -23,6 +23,7 @@ from harness import (  # noqa: E402
     dsp_deviation,
     parse_baseline,
     parse_metrics,
+    parse_survey,
     prune_runs,
     Sample,
     read_rows,
@@ -177,6 +178,52 @@ def test_rows_survive_a_write_read_round_trip():
 def test_read_rows_of_a_missing_file_is_empty():
     with tempfile.TemporaryDirectory() as d:
         assert read_rows(Path(d) / "nope.csv") == []
+
+
+SURVEY_LOG = """
+GGXSURVEY total_failing 1852
+GGXSURVEY block=sampler_scram0 endpoints=348 slack=-0.617 levels=7 logic=1.900 route=3.717 route_pct=66.2 carry4=2 dsp=0 lut=5
+GGXSURVEYPIN block=sampler_scram0 start=u_sampler/scram0/a_reg[3]/C end=u_sampler/scram0/b_reg[9]/D
+GGXSURVEY MISSING oct32 prefix=u_reproject_normalize/u_oct32 -- no failing endpoint matched
+HARNESS_SURVEY_DONE
+"""
+
+
+def test_parse_survey_reads_a_block_and_its_pins():
+    blocks, missing = parse_survey(SURVEY_LOG)
+    assert missing == ["oct32"], missing
+    assert len(blocks) == 1
+    b = blocks[0]
+    assert b["block"] == "sampler_scram0"
+    assert b["endpoints"] == 348
+    assert b["slack"] == -0.617
+    assert b["levels"] == 7
+    assert b["carry4"] == 2
+    assert b["route_pct"] == 66.2
+    assert b["start"].endswith("/C") and b["end"].endswith("/D")
+
+
+def test_parse_survey_rejects_a_run_that_never_finished():
+    try:
+        parse_survey(SURVEY_LOG.replace("HARNESS_SURVEY_DONE", ""))
+    except HarnessError as e:
+        assert "HARNESS_SURVEY_DONE" in str(e), e
+    else:
+        raise AssertionError("an incomplete survey must not be reported")
+
+
+def test_parse_survey_rejects_a_block_with_no_pins():
+    # A row of shape numbers with no endpoints named is not a survey finding --
+    # the whole point is being able to go look at the path.
+    orphan = SURVEY_LOG.replace(
+        "GGXSURVEYPIN block=sampler_scram0 start=u_sampler/scram0/a_reg[3]/C "
+        "end=u_sampler/scram0/b_reg[9]/D\n", "")
+    try:
+        parse_survey(orphan)
+    except HarnessError as e:
+        assert "sampler_scram0" in str(e), e
+    else:
+        raise AssertionError("a block with no start/end pins must not be reported")
 
 
 def _make_runs(root: Path, *names):
