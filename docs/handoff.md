@@ -10,6 +10,39 @@ DSP-reduction / timing-closure decisions on this branch — the part that doesn'
 2. **Then scale to 5 lanes** (1 Gsps) as a 3-way bin-pack over DSP(220)/LUT(53k)/BRAM(140) — possibly
    *heterogeneous* lanes (some DSP, some DSP-free fabric) to balance across the FPGA's columns.
 
+## Where the campaign stands (2026-08-01)
+
+**Start here.** Two prefactor tickets are done and they changed the plan.
+
+- **#20 (T14) — the harness.** Every timing claim is now a row in `sim/timing_history.csv`, produced by
+  `python sim/harness.py pnr`, and "bit-identical" means `python sim/harness.py baseline check` against
+  `sim/baselines/ggx_control_oct32.txt`. **Quote rows from that file; treat any resource figure not in
+  it as unsourced, including the ones elsewhere in this document.** See `docs/harness.md`.
+- **#22 (T16) — the path-shape survey.** `docs/surveys/t16-path-shapes.md`. It re-derived the campaign
+  order, and three tickets were rewritten because their premises were wrong.
+
+Current measurement, `394ea9f`: **WNS −1.330, TNS −406.686, 1852 failing endpoints, 79 DSP, 8862 LUT,
+4.5 BRAM, 1302 CARRY4.**
+
+The three findings that matter:
+
+1. **The sampler's bulk is a ready chain, not its multiplies.** 875 of 1852 failing endpoints (47.2%),
+   carrying 42.9% of TNS, route through a combinational AXI-Stream backpressure chain that starts at
+   `u_projected_area/d1b_valid_reg` and ends on DSP48 **clock-enable** pins. Measured, not inferred
+   (`sim/ready_census.tcl`). This became **#31** and is the campaign's first item. #23 was narrowed to
+   `hash0` alone, which is the only sampler bucket that really is the constant multiplies.
+2. **The WNS holder is not the multiply it is named after.** #24's path is a skid-buffer distributed-RAM
+   read plus operand conditioning into the DSP's `A` port. The lever is an operand register. Six
+   endpoints, so it moves WNS and essentially nothing else.
+3. **`projected_area_sq` is structural** — 0 logic levels, DSP straight into DSP, 78.6% of the delay
+   inside the DSP macro. #27 was costed as a register split and is not one; re-estimate before
+   scheduling.
+
+**Read TNS and WNS separately from here on.** #31 should move TNS hard and WNS not at all; #24 the
+reverse. Judging either on the wrong metric reads a success as a failure.
+
+Order: **#31 → #25 → #24 → #26 (checkpoint) → #23, #32, #27 → #28.**
+
 ## Pipeline (top = `axis_ggx_control`)
 `u_basis` (event_basis, **PER-BURST** — computed once, then N samples stream) → then the **PER-SAMPLE**
 chain: `u_sampler` (sobol → scramble → hash) → `u_projected_area` → `u_reproject_normalize`.
