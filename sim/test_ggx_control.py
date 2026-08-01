@@ -12,6 +12,7 @@ from cocotb.utils import get_sim_time as gst
 from cocotb_bus.bus import Bus
 from cocotb_bus.drivers import BusDriver
 from cocotb_bus.monitors import BusMonitor
+from oct32_model import oct_decode, oct_encode
 from sources import sources_for
 
 test_file = os.path.basename(__file__).replace(".py", "")
@@ -544,7 +545,12 @@ async def test_ggx_control(dut):
         # verdict on the same run.
         si = stream_state["idx"]
         stream_state["idx"] = si + 1
-        packed_h = unpack_vec96_q131_xyz(int(transaction["data"]) & ((1 << 96) - 1))
+        # The Lane's output contract is Oct32 now (ADR-0001), so decode the two
+        # 16-bit fields back to a direction before comparing. The gate still
+        # asserts on direction, which is what the contract actually promises.
+        raw = int(transaction["data"]) & 0xFFFF_FFFF
+        packed_h = np.asarray(oct_decode(raw & 0xFFFF, (raw >> 16) & 0xFFFF, 16),
+                              dtype=np.float64)
         if si >= len(stream_expected):
             stream_failures.append(
                 f"STREAM-INTEGRITY GATE: output #{si} is past the end of the expected "
@@ -567,23 +573,19 @@ async def test_ggx_control(dut):
                     f"(out#{si}): TLAST got={int(transaction['last'])} exp={ref['last']}"
                 )
 
-        # --- Bias gate ------------------------------------------------
-        if not expected_math:
-            raise AssertionError("Output with empty expected queue")
+        # --- Output bookkeeping --------------------------------------
+        # The output-boundary Bias gate USED TO BE HERE. It is gone with the
+        # block it measured: the output is Oct32 now, whose 16-bit field step
+        # (~3e-5) swamps the 8e-6 systematic-bias threshold outright, so the
+        # gate cannot be asserted here at all. It lives on the pre-encoder tap
+        # instead -- see the ADR-0001 exception note at pre_encoder_bias_model.
+        # Do not reinstate a weakened version of it here.
         if out_state["cmd_idx"] >= len(burst_sizes):
             raise AssertionError("Output observed before command was fully parsed")
 
-        exp_h = expected_math.pop(0)
-        packed = int(transaction["data"]) & ((1 << 96) - 1)
         got_last = int(transaction["last"])
-        got_h = unpack_vec96_q131_xyz(packed)
-        err = float(np.max(np.abs(got_h - exp_h)))
-        stats["max_err"] = max(stats["max_err"], err)
-        # Signed residual per component. Truncation (bit-slicing) biases toward
-        # -inf, which max|err| cannot see; a non-zero mean here is systematic
-        # error that Monte Carlo averaging will NOT remove.
-        stats["signed_sum"] += (got_h - exp_h)
-        stats["abs_sum"] += np.abs(got_h - exp_h)
+        got_h = packed_h
+        stats["max_err"] = max(stats["max_err"], stream_state["max_dev"])
         stats["n_err"] += 1
 
         exp_last = 1 if out_state["sample_idx"] == (burst_sizes[out_state["cmd_idx"]] - 1) else 0
@@ -594,20 +596,16 @@ async def test_ggx_control(dut):
             throughput_cycles_cmd0.append(int(transaction["cycle"]))
 
         if seen["n"] <= 5:
+            e = stream_expected[si]["h"] if si < len(stream_expected) else got_h
             dut._log.info(
                 f"#{seen['n']} cmd={out_state['cmd_idx']} idx={out_state['sample_idx']} "
                 f"got=({got_h[0]:.5f},{got_h[1]:.5f},{got_h[2]:.5f}) "
-                f"exp=({exp_h[0]:.5f},{exp_h[1]:.5f},{exp_h[2]:.5f})"
+                f"exp=({e[0]:.5f},{e[1]:.5f},{e[2]:.5f})"
             )
 
         if got_last != exp_last:
             raise AssertionError(
                 f"TLAST mismatch at out#{seen['n']}: got={got_last} exp={exp_last} "
-                f"(cmd={out_state['cmd_idx']} idx={out_state['sample_idx']})"
-            )
-        if err > TOL:
-            raise AssertionError(
-                f"Mismatch at out#{seen['n']}: max_err={err:.6f} tol={TOL:.6f} "
                 f"(cmd={out_state['cmd_idx']} idx={out_state['sample_idx']})"
             )
 
@@ -726,7 +724,7 @@ async def test_ggx_control(dut):
 
     assert parser["cmd_count"] == len(cmds), f"expected {len(cmds)} commands, saw {parser['cmd_count']}"
     assert len(burst_sizes) == len(cmds), f"expected {len(cmds)} parsed bursts, saw {len(burst_sizes)}"
-    assert len(expected_math) == 0, f"{len(expected_math)} expected output samples not observed"
+    assert len(expected_pre) == 0, f"{len(expected_pre)} pre-encoder expectations not observed"
     assert outm.transactions == expected_total, f"output count mismatch {outm.transactions} != {expected_total}"
     assert seen["out_last"] == len(cmds), f"expected {len(cmds)} output TLASTs, saw {seen['out_last']}"
     assert out_state["cmd_idx"] == len(cmds), f"output stream closed only {out_state['cmd_idx']} bursts"

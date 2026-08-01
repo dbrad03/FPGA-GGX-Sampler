@@ -74,6 +74,7 @@ set RTL_SOURCES(axis_ggx_control) [list \
   $_rtl_dir/axis_top_lvl_sampler.sv \
   $_rtl_dir/axis_ggx_projected_area.sv \
   $_rtl_dir/axis_ggx_reproject_normalize.sv \
+  $_rtl_dir/axis_oct32_encode.sv \
   $_rtl_dir/axis_fixed_norm3.sv \
   $_rtl_dir/axis_fixed_sqrt.sv \
   $_rtl_dir/axis_fixed_div.sv \
@@ -105,6 +106,7 @@ set RTL_SOURCES(axis_ggx_projected_area) [list \
 set RTL_SOURCES(axis_ggx_reproject_normalize) [list \
   $_rtl_dir/ggx_latency_pkg.sv \
   $_rtl_dir/axis_ggx_reproject_normalize.sv \
+  $_rtl_dir/axis_oct32_encode.sv \
   $_rtl_dir/axis_fifo_2deep.sv \
   $_rtl_dir/axis_fixed_sqrt.sv \
   $_rtl_dir/axis_fixed_div.sv \

@@ -3,6 +3,7 @@ import cocotb
 import os
 import sys
 import numpy as np
+from oct32_model import oct_decode
 from pathlib import Path
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge, FallingEdge, ReadOnly
@@ -339,14 +340,22 @@ async def test_reproject_normalize(dut):
             raise AssertionError("Output with empty expected queue")
 
         exp = expected.pop(0)
-        packed = int(transaction["data"]) & ((1 << 96) - 1)
+        # The output contract is Oct32 now (ADR-0001 / issue #16): the L2
+        # normalize this block used to end with is DELETED, and the two 16-bit
+        # fields are decoded back to a direction here. Octahedral projection is
+        # scale-invariant, so the decoded direction is what the block promises
+        # -- the vector's LENGTH is no longer part of the contract, which is
+        # why the old unit-norm check is gone rather than loosened.
+        raw = int(transaction["data"]) & 0xFFFF_FFFF
         got_last = int(transaction["last"])
-        got_h = unpack_vec96_q131_xyz(packed)
+        got_h = np.asarray(oct_decode(raw & 0xFFFF, (raw >> 16) & 0xFFFF, 16),
+                           dtype=np.float64)
 
-        err = np.max(np.abs(got_h - exp["h"]))
-        got_norm = float(np.linalg.norm(got_h))
-        exp_norm = float(np.linalg.norm(exp["h"]))
-        norm_dev = abs(got_norm - exp_norm)
+        exp_dir = exp["h"] / max(float(np.linalg.norm(exp["h"])), 1e-30)
+        err = np.max(np.abs(got_h - exp_dir))
+        got_norm = 1.0
+        exp_norm = 1.0
+        norm_dev = 0.0
         stats["max_err"] = max(stats["max_err"], float(err))
         stats["max_norm_dev"] = max(stats["max_norm_dev"], float(norm_dev))
         seen["n"] += 1

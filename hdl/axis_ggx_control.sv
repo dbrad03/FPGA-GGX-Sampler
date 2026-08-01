@@ -4,7 +4,7 @@
 module axis_ggx_control #
   (
 		parameter integer C_S00_AXIS_TDATA_WIDTH	= 64,
-		parameter integer C_M00_AXIS_TDATA_WIDTH	= 96,
+		parameter integer C_M00_AXIS_TDATA_WIDTH	= 32,   // Oct32: {w_field, u_field}
     parameter integer FRAC_BITS               = 32
 	)
   (
@@ -22,7 +22,7 @@ module axis_ggx_control #
 		input wire  m00_axis_aclk, m00_axis_aresetn,
 		input wire  m00_axis_tready,
 		output logic  m00_axis_tvalid, m00_axis_tlast, // TLAST=1 on last sample of burst
-		output logic [C_M00_AXIS_TDATA_WIDTH-1 : 0] m00_axis_tdata, // {hz, hy, hx}
+		output logic [C_M00_AXIS_TDATA_WIDTH-1 : 0] m00_axis_tdata, // Oct32 {w_field, u_field}
 		output logic [(C_M00_AXIS_TDATA_WIDTH/8)-1: 0] m00_axis_tstrb
 	);
 
@@ -139,7 +139,7 @@ module axis_ggx_control #
   wire reproj_in_ready;
   wire reproj_out_valid;
   wire reproj_out_last;
-  wire signed [95:0] reproj_out_h;
+  wire [31:0] reproj_out_h;   // Oct32 fields
 
   wire [95:0] proj_in_data = {
     basis_vh_reg[95:64],     // Vh.z (Q1.31)

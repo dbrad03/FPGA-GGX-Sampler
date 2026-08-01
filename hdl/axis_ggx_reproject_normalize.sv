@@ -4,7 +4,7 @@
 module axis_ggx_reproject_normalize #
   (
     parameter integer C_S00_AXIS_TDATA_WIDTH = 352,
-    parameter integer C_M00_AXIS_TDATA_WIDTH = 96,
+    parameter integer C_M00_AXIS_TDATA_WIDTH = 32,   // Oct32: {w_field, u_field}
     parameter integer FRAC_BITS              = 32
   )
   (
@@ -24,8 +24,8 @@ module axis_ggx_reproject_normalize #
     input  wire m00_axis_tready,
     output logic m00_axis_tvalid,
     output logic m00_axis_tlast,
-    // {hz, hy, hx}
-    output logic signed [C_M00_AXIS_TDATA_WIDTH-1:0] m00_axis_tdata,
+    // Oct32: {w_field[15:0], u_field[15:0]} -- see ADR-0001. NOT a half-vector.
+    output logic [C_M00_AXIS_TDATA_WIDTH-1:0] m00_axis_tdata,
     output logic [(C_M00_AXIS_TDATA_WIDTH/8)-1:0] m00_axis_tstrb
   );
 
@@ -41,12 +41,13 @@ module axis_ggx_reproject_normalize #
   localparam int META0_DEPTH = 128;
   localparam int META0_AW    = $clog2(META0_DEPTH);
 
-  // META1 spans u_norm_h, which wraps the pipelined inverse-sqrt. If this FIFO
-  // overflows, its TLAST tracking emits a spurious TLAST. It was bumped
-  // 128 -> 256 when the 2-phase div split grew the divider, and 128 genuinely
-  // would not do: norm3's real latency is 151.
+  // META1 spans the output block. That used to be norm3 (151 cycles); it is now
+  // the Oct32 encoder (82). If this FIFO overflows, its TLAST tracking emits a
+  // spurious TLAST. The depth is left at 256 -- it is a power-of-two ring
+  // buffer with headroom either way, and shrinking it is an area decision for
+  // the multi-Lane bin-pack, not part of deleting the normalize.
   localparam int META1_MIN_DEPTH =
-      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::NORM3_PIPELINED_LATENCY_INST); // 152
+      ggx_latency_pkg::elastic_min_depth(ggx_latency_pkg::OCT32_ENCODE_LATENCY_INST);    // 83
   localparam int META1_DEPTH = 256;
   localparam int META1_AW    = $clog2(META1_DEPTH);
 
@@ -55,8 +56,8 @@ module axis_ggx_reproject_normalize #
       $fatal(1, "axis_ggx_reproject_normalize: META0_DEPTH=%0d is below the %0d entries needed to span the sqrt latency of %0d",
              META0_DEPTH, META0_MIN_DEPTH, ggx_latency_pkg::SQRT_LATENCY_INST);
     if (META1_DEPTH < META1_MIN_DEPTH)
-      $fatal(1, "axis_ggx_reproject_normalize: META1_DEPTH=%0d is below the %0d entries needed to span the norm3 latency of %0d",
-             META1_DEPTH, META1_MIN_DEPTH, ggx_latency_pkg::NORM3_PIPELINED_LATENCY_INST);
+      $fatal(1, "axis_ggx_reproject_normalize: META1_DEPTH=%0d is below the %0d entries needed to span the Oct32 encoder latency of %0d",
+             META1_DEPTH, META1_MIN_DEPTH, ggx_latency_pkg::OCT32_ENCODE_LATENCY_INST);
   end
 
   localparam logic [31:0] ONE_UQ0_32 = 32'hFFFF_FFFF;
@@ -740,7 +741,7 @@ module axis_ggx_reproject_normalize #
   // Stage C: Normalize H
   // --------------------------------------------------------------------------
   wire norm_out_valid;
-  wire [127:0] norm_out_data;
+  wire [31:0]  norm_out_data;   // Oct32 fields
   wire out_pipe_en = m00_axis_tready || !m00_axis_tvalid;
   wire norm_out_fire = norm_out_valid && out_pipe_en;
 
@@ -767,12 +768,19 @@ module axis_ggx_reproject_normalize #
     .m_axis_tlast(fifo_norm_last)
   );
 
-  axis_fixed_norm3 u_norm_h (
+  // The per-sample L2 normalize USED TO BE HERE (axis_fixed_norm3 u_norm_h): a
+  // ~151-cycle block wrapping a digit-recurrence sqrt and a 116-stage split
+  // divider, the largest in the design and the holder of worst negative slack.
+  // It is DELETED, not bypassed. Octahedral projection is exactly
+  // scale-invariant -- oct(c*v) == oct(v) -- so encoding an un-normalized
+  // half-vector gives an identical result. See ADR-0001 and sim/oct32_model.py,
+  // where scale invariance is checked over c in [1e-3, 1e3].
+  axis_oct32_encode u_oct32 (
     .s00_axis_aclk(s00_axis_aclk),
     .s00_axis_aresetn(s00_axis_aresetn),
     .s00_axis_tlast(1'b0),
     .s00_axis_tvalid(fifo_norm_valid),
-    .s00_axis_tdata(fifo_norm_data),
+    .s00_axis_tdata(fifo_norm_data[95:0]),
     .s00_axis_tstrb('1),
     .s00_axis_tready(fifo_norm_ready),
 
@@ -821,7 +829,12 @@ module axis_ggx_reproject_normalize #
       m00_axis_tvalid <= norm_out_valid;
       if (norm_out_valid) begin
         m00_axis_tlast <= norm_aligned_last;
-        m00_axis_tdata <= $signed(norm_out_data[95:0]);
+        // BEAT PACKING: one 32-bit Sample per beat, NOT two packed into 64.
+        // Packing pairs would make TLAST ambiguous on odd-length Bursts and
+        // would need a flush beat, and it would break the one-beat-per-Sample
+        // correspondence the stream-integrity gate relies on. The DDR3
+        // bandwidth argument is already satisfied by 128 -> 32 bits.
+        m00_axis_tdata <= norm_out_data;
       end
     end
   end

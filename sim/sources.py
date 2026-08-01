@@ -76,6 +76,7 @@ SOURCES = {
         "axis_top_lvl_sampler.sv",
         "axis_ggx_projected_area.sv",
         "axis_ggx_reproject_normalize.sv",
+        "axis_oct32_encode.sv",
         "axis_fixed_norm3.sv",
         "axis_fixed_sqrt.sv",
         "axis_fixed_div.sv",
@@ -101,6 +102,7 @@ SOURCES = {
     ),
     "axis_ggx_reproject_normalize": _hdl(
         "axis_ggx_reproject_normalize.sv",
+        "axis_oct32_encode.sv",
         "axis_fifo_2deep.sv",
         "axis_fixed_sqrt.sv",
         "axis_fixed_div.sv",

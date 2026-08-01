@@ -106,6 +106,15 @@ package ggx_latency_pkg;
            + NORM3_WRAPPER_STAGES;
   endfunction
 
+  // axis_oct32_encode: 3 stages in (magnitudes/L1, shift amount, shift), the
+  // divide, and 1 output register. Replaces norm3 on the per-sample path.
+  function automatic int oct32_encode_latency(input int div_width, input int div_frac_bits);
+    return 3 + div_latency(div_width, div_frac_bits) + 1;
+  endfunction
+
+  localparam int OCT32_DIV_WIDTH = 20;
+  localparam int OCT32_DIV_FRAC  = 18;
+
   //--------------------------------------------------------------------------
   // Elastic buffers
   //--------------------------------------------------------------------------
@@ -132,5 +141,7 @@ package ggx_latency_pkg;
   localparam int SQRT_LATENCY_INST    = sqrt_latency(SQRT_SIG_BITS);                    // 26
   localparam int NORM3_PIPELINED_LATENCY_INST =
       norm3_pipelined_latency(SQRT_SIG_BITS, DIV_WIDTH, DIV_FRAC_BITS);                 // 151
+  localparam int OCT32_ENCODE_LATENCY_INST =
+      oct32_encode_latency(OCT32_DIV_WIDTH, OCT32_DIV_FRAC);                            // 82
 
 endpackage
